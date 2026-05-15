@@ -49,7 +49,6 @@ def parse_cell_centered(directory: str) -> Data:
             incident_faces_points.add(face[idx-1])
             incident_faces_points.add(face[(idx+1) % len(face)])
         for dst in sorted(incident_faces_points):
-            # TODO: here something should be done for boundary points, but I will skip it for now
             u.append(src)
             v.append(dst)
 
@@ -86,8 +85,6 @@ def load_boundary_face_centers(directory: str, verbose: bool = False) -> dict:
 
     return face_centres
 
-#TODO this function should work for several boundary names, cycling on the face_centres keys, excluding frontAndBack for 2D meshes
-
 def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, verbose: bool = False) -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
@@ -111,7 +108,6 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, ve
                         u.append(i)
                         v.append(boundary_index)
     
-    print(len(u), len(v))
     coo_index_b = torch.stack([torch.tensor(u), torch.tensor(v)], dim=0)
     x_b = torch.cat([graph_vc.x, torch.from_numpy(np.array(v)).unsqueeze(1)])
 

@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mesh2graph"
+version = "0.1.0"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mesh2graph*"]

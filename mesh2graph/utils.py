@@ -99,19 +99,19 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, ve
     pos_dict = {}
     for i, cell in enumerate(mesh.cell_faces):
         for boundary_name in names:
-            # skipping front and back faces for 
             if boundary_name in excluded_faces:
                 continue
             if mesh.is_cell_on_boundary(i, bytes(boundary_name, "utf-8")):
-                u.append(i)
                 for face in mesh.cell_faces[i]:
                     if mesh.is_face_on_boundary(face,  bytes(boundary_name, "utf-8")):
                         if verbose:
                             print(f"Cell {i} is on the {boundary_name} boundary and has face {face} on the {boundary_name} boundary")
                         boundary_index += 1
                         pos_dict[boundary_index] = np.mean(mesh.points[mesh.faces[face]], axis=0)
+                        u.append(i)
                         v.append(boundary_index)
-        
+    
+    print(len(u), len(v))
     coo_index_b = torch.stack([torch.tensor(u), torch.tensor(v)], dim=0)
     x_b = torch.cat([graph_vc.x, torch.from_numpy(np.array(v)).unsqueeze(1)])
 

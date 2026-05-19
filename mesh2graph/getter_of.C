@@ -43,6 +43,10 @@ SourceFiles
 #include <Eigen/Dense>
 #include "iostream"
 #include "Foam2Eigen.H"
+#include "primitiveMeshTools.H"
+#include "polyMeshTools.H"
+
+
 
 #if PY_VERSION_HEX < 0x03000000
 #define MyPyText_AsString PyString_AsString
@@ -69,7 +73,7 @@ autoPtr<Foam::Time> _runTime;
 
     // Getter for face surface area vectors
 
-    std::vector<Eigen::MatrixXd> getSf()
+    std::vector<Eigen::MatrixXd> getSfByPatch()
     {
         std::vector<Eigen::MatrixXd> result;
 
@@ -82,6 +86,13 @@ autoPtr<Foam::Time> _runTime;
             result.push_back(Foam2Eigen::field2Eigen(X));
         }
         return result;
+    }
+
+    Eigen::MatrixXd getSf()
+    {
+        // Full face area vector field (internal + boundary faces)
+        const vectorField& Sf = _mesh().Sf();
+        return Foam2Eigen::field2Eigen(Sf);
     }
 
     // Getter for boundary face centers
@@ -110,6 +121,48 @@ autoPtr<Foam::Time> _runTime;
         }
         return result;
     }
+
+    Eigen::VectorXd getSkewness()
+    {
+        // skewness() returns values for all faces including boundary
+        const scalarField skewness = primitiveMeshTools::faceSkewness(
+            _mesh(),
+            _mesh().points(),
+            _mesh().faceCentres(),
+            _mesh().faceAreas(),
+            _mesh().cellCentres()
+        );
+        return Foam2Eigen::field2Eigen(skewness);
+    }
+
+    Eigen::VectorXd getNonOrthogonality()
+    {
+        const fvMesh& mesh = _mesh();
+        const labelList& own = mesh.faceOwner();
+        const labelList& nei = mesh.faceNeighbour();
+        const vectorField& cc = mesh.cellCentres();
+        const vectorField& areas = mesh.faceAreas();
+
+        scalarField nonOrtho(mesh.nFaces(), 0.0);
+
+        // Internal faces
+        for (label facei = 0; facei < mesh.nInternalFaces(); facei++)
+        {
+            nonOrtho[facei] = primitiveMeshTools::faceOrthogonality(
+                cc[own[facei]],
+                cc[nei[facei]],
+                areas[facei]
+            );
+        }
+
+        // Boundary faces: no neighbour cell, set to 1 (perfectly orthogonal)
+        for (label facei = mesh.nInternalFaces(); facei < mesh.nFaces(); facei++)
+        {
+            nonOrtho[facei] = 1.0;
+        }
+
+        return Foam2Eigen::field2Eigen(nonOrtho);
+    }
 };
 
 
@@ -128,5 +181,8 @@ PYBIND11_MODULE(getter_of, m)
             py::arg("args") = std::vector<std::string> { "." })
             .def("getCf", &getter_of::getCf, py::return_value_policy::reference_internal)
             .def("getPatchName", &getter_of::getPatchName)
-            .def("getSf", &getter_of::getSf, py::return_value_policy::reference_internal);
+            .def("getSf", &getter_of::getSf, py::return_value_policy::reference_internal)
+            .def("getSfByPatch", &getter_of::getSfByPatch, py::return_value_policy::reference_internal)
+            .def("getSkewness", &getter_of::getSkewness, py::return_value_policy::reference_internal)
+            .def("getNonOrthogonality", &getter_of::getNonOrthogonality, py::return_value_policy::reference_internal);
 }

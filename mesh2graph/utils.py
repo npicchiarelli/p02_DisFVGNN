@@ -14,7 +14,7 @@ from smithers.io.openfoam import FoamMesh
 from getter_of import getter_of
 
 
-def parse_vertex_centered(directory: str) -> Data:
+def parse_vertex_centered(directory: str, return_face_idx: bool = False) -> Data:
 
     mesh = FoamMesh(directory)
     try:
@@ -22,6 +22,8 @@ def parse_vertex_centered(directory: str) -> Data:
     except:
         print("Error reading cell centres\nPlease execute `postProcess -func 'writeCellCentres' -time 0' in the mesh directory to generate the file `0/C` containing the cell centres")
     u, v = [], []
+    if return_face_idx:
+        face_idx = []
     for src in range(mesh.num_cell):
         for dst in mesh.cell_neighbour_cells(src):
             # skip boundary neighbors
@@ -29,13 +31,16 @@ def parse_vertex_centered(directory: str) -> Data:
                 continue
             u.append(src)
             v.append(dst)
+            face_idx.append(set(mesh.cell_faces[src]).intersection(set(mesh.cell_faces[dst])).pop()) # get the index of the face shared by the two cells
 
     u = torch.tensor(u)
     v = torch.tensor(v)
 
     graph_vc = Data(x = torch.arange(mesh.num_cell).reshape(-1, 1), pos = torch.tensor(mesh.cell_centres[:,:]), edge_index=torch.stack([u, v], dim=0))
-
-    return graph_vc
+    if return_face_idx:
+        return graph_vc, face_idx
+    else:
+        return graph_vc
 
 def parse_cell_centered(directory: str) -> Data:
     mesh = FoamMesh(directory)
@@ -81,17 +86,55 @@ def load_boundary_face_centers(directory: str, verbose: bool = False) -> dict:
         dir_path = os.path.dirname(os.path.realpath(__file__))
         print(f"Mesh folder: {dir_path}")
 
-    print(f"cwd restored to {os.getcwd()}")
-
     return face_centres
 
-def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, verbose: bool = False) -> Data:
+def load_face_surfaces(graph_vc: Data, directory: str) -> torch.Tensor:
+
+    of_binder = getter_of([".", "-case", f"{directory}"])
+
+    Sf = of_binder.getSf()
+    Sf = torch.from_numpy(Sf.reshape(-1, 3))
+
+    return Sf
+
+def load_face_surfaces_by_patch(graph_vc: Data, directory: str) -> dict:
+
+    of_binder = getter_of([".", "-case", f"{directory}"])
+
+    Sf = of_binder.getSfByPatch()
+    Sf = [SfPatch.reshape(-1, 3) for SfPatch in Sf]
+    names = of_binder.getPatchName()
+    names.insert(0, 'internal')
+
+    return dict(zip(names, Sf))
+
+def load_skewness(directory: str) -> torch.Tensor:
+
+    of_binder = getter_of([".", "-case", f"{directory}"])
+
+    skewness = of_binder.getSkewness()
+    skewness = torch.from_numpy(skewness.reshape(-1, 1))
+
+    return skewness
+
+def load_non_orthogonality(directory: str) -> torch.Tensor:
+
+    of_binder = getter_of([".", "-case", f"{directory}"])
+
+    non_orthogonality = of_binder.getNonOrthogonality()
+    non_orthogonality = torch.from_numpy(non_orthogonality.reshape(-1, 1))
+
+    return non_orthogonality
+
+def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, return_face_idx: bool = False, verbose: bool = False) -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
     names = of_binder.getPatchName()
     
     mesh = FoamMesh(directory)
     u,v = [], []
+    if return_face_idx:
+        boundary_faces_idx = []
     boundary_index = mesh.num_cell-1 # boundary nodes will have indices out of the bounds of the cell-centered graph
     pos_dict = {}
     for i, cell in enumerate(mesh.cell_faces):
@@ -105,6 +148,8 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, ve
                             print(f"Cell {i} is on the {boundary_name} boundary and has face {face} on the {boundary_name} boundary")
                         boundary_index += 1
                         pos_dict[boundary_index] = np.mean(mesh.points[mesh.faces[face]], axis=0)
+                        if return_face_idx:
+                            boundary_faces_idx.append(face)
                         u.append(i)
                         v.append(boundary_index)
     
@@ -117,4 +162,20 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, ve
 
     graph_vc_boundary = Data(x = x_b, pos = pos_b, edge_index=edge_index_b)
 
-    return graph_vc_boundary
+    if return_face_idx:
+        return graph_vc_boundary, boundary_faces_idx
+    else:
+        return graph_vc_boundary
+
+def make_undirected(coo:torch.Tensor):
+    if coo.ndim != 2 or coo.shape[0] != 2:
+        raise ValueError(
+            f"edge_index must have shape [2, num_edges], "
+            f"got {tuple(coo.shape)}"
+        )
+    src, dst = coo
+    undirected = torch.stack([
+        torch.minimum(src, dst),
+        torch.maximum(src, dst)
+    ])
+    return torch.unique(undirected, dim = 1)

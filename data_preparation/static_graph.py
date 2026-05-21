@@ -28,24 +28,24 @@ def build_static_graph(case_dir,
     bnd_type[:, 1] = 1.0 # One hot encoding for boundary nodes
     node_type = torch.cat((node_type, bnd_type), dim = 0) # add them to the node_type encoding
 
-    # #Adding node type and position to the x attribute of static_graph
+    # Adding node type and position to the x attribute of static_graph
     static_graph.node_attr = torch.cat((node_type, static_graph.pos), dim = 1)
 
     #-------------------------------------EDGES---------------------------------------------
 
     # Distance calculation
-    owner    = static_graph.edge_index[:,0]
-    neighbor = static_graph.edge_index[:,1]
+    owner    = static_graph.edge_index[0,:]
+    neighbor = static_graph.edge_index[1,:]
 
-    dist_vec  = static_graph.pos[owner] - neighbor[neighbor]
-    dist_norm = np.linalg.norm(dist_vec, axis=1, keepdims=True)
+    dist_vec  = static_graph.pos[owner] - static_graph.pos[neighbor]
+    dist_norm = dist_vec.norm(dim=1, keepdim=True)
 
     # Surface area vector from openfoam
 
     Sf_by_patch = load_face_surfaces_by_patch(static_graph, case_dir)
     Sf = np.concatenate([Sf_by_patch[s] if s not in excluded_faces 
                             else np.full(Sf_by_patch[s].shape, np.nan) 
-                            for s in Sf_by_patch], axis=0)
+                            for s in Sf_by_patch], axis=0) # useful for debugging, but not strictly necessary since we will be selecting only the faces that are not in the excluded_faces list
     surface_area_vec = Sf[innner_faces_idx+boundary_faces_idx]
     surface_area_vec = torch.from_numpy(surface_area_vec).float()
     surface_area_vec_norm = torch.norm(surface_area_vec, dim=1, keepdim=True)

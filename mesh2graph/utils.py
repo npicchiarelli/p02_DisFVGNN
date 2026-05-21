@@ -10,7 +10,7 @@ import torch_geometric
 from torch_geometric.data import Data
 
 sys.path.insert(0, os.path.dirname(__file__))
-from smithers.io.openfoam import FoamMesh
+from smithers.io.openfoam import FoamMesh, field_parser
 from getter_of import getter_of
 
 
@@ -31,7 +31,8 @@ def parse_vertex_centered(directory: str, return_face_idx: bool = False) -> Data
                 continue
             u.append(src)
             v.append(dst)
-            face_idx.append(set(mesh.cell_faces[src]).intersection(set(mesh.cell_faces[dst])).pop()) # get the index of the face shared by the two cells
+            if return_face_idx:
+                face_idx.append(set(mesh.cell_faces[src]).intersection(set(mesh.cell_faces[dst])).pop()) # get the index of the face shared by the two cells
 
     u = torch.tensor(u)
     v = torch.tensor(v)
@@ -126,7 +127,7 @@ def load_non_orthogonality(directory: str) -> torch.Tensor:
 
     return non_orthogonality
 
-def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, return_face_idx: bool = False, verbose: bool = False) -> Data:
+def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx: bool = False, verbose: bool = False) -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
     names = of_binder.getPatchName()
@@ -139,7 +140,7 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_faces: list, re
     pos_dict = {}
     for i, cell in enumerate(mesh.cell_faces):
         for boundary_name in names:
-            if boundary_name in excluded_faces:
+            if boundary_name in excluded_patches:
                 continue
             if mesh.is_cell_on_boundary(i, bytes(boundary_name, "utf-8")):
                 for face in mesh.cell_faces[i]:
@@ -179,3 +180,45 @@ def make_undirected(coo:torch.Tensor):
         torch.maximum(src, dst)
     ])
     return torch.unique(undirected, dim = 1)
+
+def _filter_of_time_directories(case_dir):
+    result = []
+    for name in os.listdir(case_dir):
+        try:
+            float(name)
+            result.append(str(name))
+        except ValueError:
+            pass
+    return sorted(result)
+
+def parse_internal_fields_alltimes(case_dir, fieldnames):
+    internal_fields = {}
+    for name in fieldnames:
+        internal_fields[name] = {}
+        for time in _filter_of_time_directories(case_dir):
+            internal_fields[name][time] = field_parser.parse_internal_field(os.path.join(case_dir, time, name))
+            if not isinstance(internal_fields[name][time], np.ndarray):
+                print(f"Warning: Field {name} at time {time} is not a numpy array.")
+    return internal_fields
+
+def parse_boundary_fields_alltimes(case_dir, fieldnames, excluded_patches=None):
+    # initial encoding of excluded_patches, make it consistent with the encoding of the patch names in the smithers mesh
+    for i,patch in enumerate(excluded_patches):
+        if not isinstance(patch, bytes):
+            excluded_patches[i] = bytes(patch, "utf-8")
+
+    boundary_fields = {}
+    mesh = FoamMesh(case_dir)
+    patches2parse = [p for p in mesh.boundary.keys() if p not in excluded_patches]
+    lengths = {patch: mesh.boundary[patch].num for patch in patches2parse}
+
+    for name in fieldnames:
+        boundary_fields[name] = {}
+        for time in _filter_of_time_directories(case_dir):
+            field_data = field_parser.parse_boundary_field(os.path.join(case_dir, time, name))
+            field_data = {patch: field_data[patch] for patch in patches2parse}
+            field_data = {patch: np.full(lengths[patch], field_data[patch][b'value']) for patch in patches2parse}
+            boundary_fields[name][time] = field_data
+    return boundary_fields
+
+

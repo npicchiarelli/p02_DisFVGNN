@@ -9,7 +9,7 @@ from smithers.io.openfoam import field_parser
 
 
 def build_static_graph(case_dir,
-                       excluded_faces) -> Data:
+                       excluded_patches) -> Data:
     
     #-------------------------------------NODES---------------------------------------------
 
@@ -21,7 +21,7 @@ def build_static_graph(case_dir,
     node_type = torch.zeros(N_int, 2, dtype=torch.float32)
     node_type[:,0] = 1.0 # One hot encoding for internal or boundary type. Only internal nodes at this point
 
-    static_graph, boundary_faces_idx = add_boundary_points(static_graph, case_dir, excluded_faces, return_face_idx=True)
+    static_graph, boundary_faces_idx, patches = add_boundary_points(static_graph, case_dir, excluded_patches, return_face_idx_patch=True)
     N_bnd = static_graph.num_nodes - N_int
 
     bnd_type = torch.zeros(N_bnd, 2, dtype=torch.float32)
@@ -29,7 +29,7 @@ def build_static_graph(case_dir,
     node_type = torch.cat((node_type, bnd_type), dim = 0) # add them to the node_type encoding
 
     # Adding node type and position to the x attribute of static_graph
-    static_graph.node_attr = torch.cat((node_type, static_graph.pos), dim = 1)
+    static_graph.node_attr = torch.cat((node_type, static_graph.pos), dim = 1).float()
 
     #-------------------------------------EDGES---------------------------------------------
 
@@ -41,9 +41,9 @@ def build_static_graph(case_dir,
     dist_norm = dist_vec.norm(dim=1, keepdim=True)
 
     # Surface area vector from openfoam
-
+    #TODO: surface area vectors for the two direction of an edge (face) should have opposite signs.
     Sf_by_patch = load_face_surfaces_by_patch(static_graph, case_dir)
-    Sf = np.concatenate([Sf_by_patch[s] if s not in excluded_faces 
+    Sf = np.concatenate([Sf_by_patch[s] if s not in excluded_patches
                             else np.full(Sf_by_patch[s].shape, np.nan) 
                             for s in Sf_by_patch], axis=0) # useful for debugging, but not strictly necessary since we will be selecting only the faces that are not in the excluded_faces list
     surface_area_vec = Sf[innner_faces_idx+boundary_faces_idx]
@@ -55,5 +55,6 @@ def build_static_graph(case_dir,
     Sk = Sk[innner_faces_idx+boundary_faces_idx]
     No = No[innner_faces_idx+boundary_faces_idx]
     edge_attr = torch.cat((dist_vec, dist_norm, surface_area_vec, surface_area_vec_norm, Sk, No), dim=1)
+    static_graph.edge_attr = edge_attr.float()
 
-    return Data(x=static_graph.node_attr, edge_index=static_graph.edge_index, edge_attr=edge_attr)
+    return static_graph

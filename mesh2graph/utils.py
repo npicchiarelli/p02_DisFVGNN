@@ -127,15 +127,16 @@ def load_non_orthogonality(directory: str) -> torch.Tensor:
 
     return non_orthogonality
 
-def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx: bool = False, verbose: bool = False) -> Data:
+def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx_patch: bool = False, verbose: bool = False) -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
     names = of_binder.getPatchName()
     
     mesh = FoamMesh(directory)
     u,v = [], []
-    if return_face_idx:
+    if return_face_idx_patch:
         boundary_faces_idx = []
+        patches = {patch_name : [] for patch_name in names if patch_name not in excluded_patches} # dictionary to store the indices of the boundary nodes corresponding to each patch
     boundary_index = mesh.num_cell-1 # boundary nodes will have indices out of the bounds of the cell-centered graph
     pos_dict = {}
     for i, cell in enumerate(mesh.cell_faces):
@@ -149,8 +150,9 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, 
                             print(f"Cell {i} is on the {boundary_name} boundary and has face {face} on the {boundary_name} boundary")
                         boundary_index += 1
                         pos_dict[boundary_index] = np.mean(mesh.points[mesh.faces[face]], axis=0)
-                        if return_face_idx:
+                        if return_face_idx_patch:
                             boundary_faces_idx.append(face)
+                            patches[boundary_name].append(boundary_index)
                         u.append(i)
                         v.append(boundary_index)
     
@@ -163,8 +165,8 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, 
 
     graph_vc_boundary = Data(x = x_b, pos = pos_b, edge_index=edge_index_b)
 
-    if return_face_idx:
-        return graph_vc_boundary, boundary_faces_idx
+    if return_face_idx_patch:
+        return graph_vc_boundary, boundary_faces_idx, patches
     else:
         return graph_vc_boundary
 
@@ -181,7 +183,7 @@ def make_undirected(coo:torch.Tensor):
     ])
     return torch.unique(undirected, dim = 1)
 
-def _filter_of_time_directories(case_dir):
+def filter_of_time_directories(case_dir):
     result = []
     for name in os.listdir(case_dir):
         try:
@@ -195,7 +197,7 @@ def parse_internal_fields_alltimes(case_dir, fieldnames):
     internal_fields = {}
     for name in fieldnames:
         internal_fields[name] = {}
-        for time in _filter_of_time_directories(case_dir):
+        for time in filter_of_time_directories(case_dir):
             internal_fields[name][time] = field_parser.parse_internal_field(os.path.join(case_dir, time, name))
             if not isinstance(internal_fields[name][time], np.ndarray):
                 print(f"Warning: Field {name} at time {time} is not a numpy array.")
@@ -214,11 +216,9 @@ def parse_boundary_fields_alltimes(case_dir, fieldnames, excluded_patches=None):
 
     for name in fieldnames:
         boundary_fields[name] = {}
-        for time in _filter_of_time_directories(case_dir):
+        for time in filter_of_time_directories(case_dir):
             field_data = field_parser.parse_boundary_field(os.path.join(case_dir, time, name))
             field_data = {patch: field_data[patch] for patch in patches2parse}
             field_data = {patch: np.full(lengths[patch], field_data[patch][b'value']) for patch in patches2parse}
             boundary_fields[name][time] = field_data
     return boundary_fields
-
-

@@ -91,8 +91,28 @@ public:
         );
     }
 
-    void setScalarField(Eigen::VectorXd F)
+    void setScalarField(Eigen::VectorXd F, std::vector<double> dims = std::vector<double>(7, 0.0))
     {
+        dimensionSet newDims(dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6]);
+
+        // Reassign field with new dimensions
+        _SF.reset
+        (
+            new volScalarField
+            (
+                IOobject
+                (
+                    _SF->name(),
+                    _SF->time().timeName(),
+                    _SF->mesh(),
+                    IOobject::NO_READ,
+                    IOobject::AUTO_WRITE
+                ),
+                _SF->mesh(),
+                dimensionedScalar(_SF->name(), newDims, 0.0)
+            )
+        );
+
         _SF() = Foam2Eigen::Eigen2field(_SF(), F);
     }
 

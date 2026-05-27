@@ -117,8 +117,8 @@ def temporal_split(
 ) -> Tuple[SingleMeshDataset, SingleMeshDataset, SingleMeshDataset]:
 
     n = len(T_sequence) - history
-    n_train = int(n * train_frac)
-    n_val   = int(n * val_frac)
+    n_train = round(n * train_frac)
+    n_val   = round(n * val_frac)
 
     train_idx = torch.arange(0, n_train)
     val_idx   = torch.arange(n_train, n_train + n_val)

@@ -1,49 +1,77 @@
+import os
+from pathlib import Path
+import shutil
+from sys import exit
+
+import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
-from data_preparation.static_graph import build_static_graph
+from tqdm import tqdm
+
+from data_preparation.field import load_fields
 from data_preparation.mesh_dataset import SingleMeshDataset, temporal_split
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.field import load_fields
+from data_preparation.static_graph import build_static_graph
+from export_results.saving_of import saving_of
+from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
-from mesh2graph.utils import parse_internal_fields_alltimes, parse_boundary_fields_alltimes
-from smithers.io.openfoam import FoamMesh
-from sys import exit
+from soap import SOAP
 
 torch.default_dtype = torch.float32
 
 # ── 0. Configuration ──────────────────────────────────────────────────
 
-case_dir = "./tests/data/flange"
+case_name = "flange_short"
 excluded_patches = ["patch1", "patch3"]
+epochs = 500
 
+raw_data_dir = "../raw_data"
+case_dir = os.path.join(raw_data_dir, case_name)
+processed_data_dir = Path("../processed_data")
+
+os.makedirs(os.path.join(processed_data_dir, f"{case_name}_history1"), exist_ok=True)
+
+pred_dir  = os.path.join(processed_data_dir, f"{case_name}_history1", "predictions")
+error_dir = os.path.join(processed_data_dir, f"{case_name}_history1", "errors")
+
+os.makedirs(pred_dir, exist_ok=True)
+os.makedirs(error_dir, exist_ok=True)
+
+Path(Path(pred_dir) / f'{case_name}_history1_predictions.foam').touch() # In order to visualize predictios and errors with paraview, we need a .foam placeholder
+Path(Path(error_dir) / f'{case_name}_history1_errors.foam').touch()
+
+for of_dir in ['system', 'constant']:
+    shutil.copytree(os.path.join(case_dir, of_dir), os.path.join(pred_dir, of_dir), dirs_exist_ok=True)
+    shutil.copytree(os.path.join(case_dir, of_dir), os.path.join(error_dir, of_dir), dirs_exist_ok=True)
+
+checkpoint_dir = Path(processed_data_dir / f"{case_name}_history1" / "checkpoints")
+os.makedirs(checkpoint_dir, exist_ok=True)
 
 # ── 1. Load your mesh data ──────────────────────────────────────────────────
 
 static_graph = build_static_graph(case_dir, excluded_patches)
 T_sequence = load_fields(case_dir, 'T', excluded_patches=excluded_patches)
-print("Static graph:", static_graph, static_graph.node_attr.dtype, static_graph.edge_attr.dtype)
-print("T sequence shape:", T_sequence.shape, T_sequence.dtype)  # Should be (T, N)
-print(static_graph.x)  # Should be (E, F_e)
-
-print(f"Total training samples: {(len(T_sequence) - 5)*len(static_graph.x)}")  # history=5, so we lose the first 5 samples
-exit(0)
-
+print("Static graph:", static_graph)
+print("T sequence shape:", T_sequence.shape)  # Should be (T, N)
 
 # ── 2. Split & normalise ────────────────────────────────────────────────────
 normalizer = FeatureNormalizer()
-history = 5   # use last 5 timesteps to predict next
+history = 1   # use last 1 timestep to predict next
 
 train_ds, val_ds, test_ds = temporal_split(
-    T_sequence, static_graph, normalizer, history=history
+    T_sequence, static_graph, normalizer, history=history,
+    train_frac=0.5, val_frac=0.15
 )
 
-# normalizer.save("checkpoints/normalizer.pt")
+print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}, Test samples: {len(test_ds)}, Total: {len(train_ds) + len(val_ds) + len(test_ds)}")
+normalizer.save(os.path.join(checkpoint_dir, "normalizer.pt"))
 
 train_loader = DataLoader(train_ds, batch_size=16, shuffle=False,  num_workers=4)
 val_loader   = DataLoader(val_ds,   batch_size=16, shuffle=False, num_workers=4)
 
 # ── 3. Model & optimiser ────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 in_node_feat  = history + static_graph.node_attr.shape[1]  # T history + geometry
 in_edge_feat  = static_graph.edge_attr.shape[1]            # 10
@@ -53,19 +81,22 @@ model = FVSurrogate(
     in_edge_feat=in_edge_feat,
     hidden_dim=64,
     out_dim=1,
-    n_mp_layers=4,         # message passing depth — think of it as stencil reach
+    n_mp_layers=4,         # message passing depth
 ).to(device)
 
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")
-
-exit(0)
-
-
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+print(f"Total training samples: {(len(T_sequence) - 5)*len(static_graph.x):4e}")  # history=5, so we lose the first 5 samples
+# optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+optimizer = SOAP(model.parameters(), lr=3e-3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+# criterion = torch.nn.MSELoss()
 
 # ── 4. Training loop ────────────────────────────────────────────────────────
-for epoch in range(500):
+train_losses = []
+val_losses   = []
+
+pbar = tqdm(range(epochs), desc="Training")
+for epoch in pbar:
     model.train()
     total_loss = 0.0
     for batch in train_loader:
@@ -77,6 +108,7 @@ for epoch in range(500):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
+    train_losses.append(total_loss / len(train_loader))
 
     # Validation
     model.eval()
@@ -88,5 +120,55 @@ for epoch in range(500):
             val_loss += torch.nn.functional.mse_loss(pred, batch.y).item()
 
     val_loss /= len(val_loader)
+    val_losses.append(val_loss)
     # scheduler.step(val_loss)
-    print(f"Epoch {epoch:4d} | train {total_loss/len(train_loader):.4e} | val {val_loss:.4e}")
+    pbar.set_postfix({"train_loss": f"{total_loss/len(train_loader):.4e}", "val_loss": f"{val_loss:.4e}"})
+    # print(f"Epoch {epoch:4d} | train {total_loss/len(train_loader):.4e} | val {val_loss:.4e}")
+
+np.save(os.path.join(checkpoint_dir, "train_losses.npy"), train_losses)
+np.save(os.path.join(checkpoint_dir, "val_losses.npy"), val_losses)
+torch.save(model.state_dict(), os.path.join(checkpoint_dir, "model.pt"))
+
+# ── 5. Testing and rollout ────────────────────────────────────────────────────────
+
+model.eval()
+preds = []
+trues = []
+times = filter_of_time_directories(case_dir)
+train_times = times[:len(train_ds)]
+val_times = times[len(train_ds):len(train_ds)+len(val_ds)]
+test_times = times[len(train_ds)+len(val_ds):-history]
+# print(f"Testing on {len(test_times)} samples from times: {test_times}")
+for i in range(len(test_ds)):
+    batch = test_ds[i].to(device)
+    # print(f"Testing on sample {i+1}/{len(test_ds)} (time: {test_times[i]})")
+    with torch.no_grad():
+        pred = model(batch)
+    preds.append(pred.cpu())
+    trues.append(batch.y.cpu())
+
+
+T_pred_norm = torch.stack(preds, dim=0)              # (n_test, N)
+T_true_norm = torch.stack(trues, dim=0)              # (n_test, N)
+
+T_pred = test_ds.norm.inverse_transform_T(T_pred_norm)
+T_true = test_ds.norm.inverse_transform_T(T_true_norm)
+
+
+print("Test MAE:", torch.mean(torch.abs(T_pred - T_true)).item())
+print("Test MSE:", torch.mean((T_pred - T_true) ** 2).item())
+
+print("Saving results to OpenFOAM  fields...")
+saver = saving_of([".", "-case", case_dir])
+
+for i, time in enumerate(test_times):
+    # print(f"Exporting time {time} ({i+1}/{len(test_times)})")
+    pred_time = os.path.join(pred_dir, time)
+    err_time  = os.path.join(error_dir,  time)
+    os.makedirs(pred_time, exist_ok=True)
+    os.makedirs(err_time , exist_ok=True)
+
+    saver.setScalarField(T_pred[i].numpy(), [0, 0, 0, 1, 0, 0, 0])
+    saver.exportScalarField(time, pred_dir, "T")
+    saver.setScalarField(torch.abs(T_pred[i] - T_true[i]).numpy(), [0, 0, 0, 1, 0, 0, 0])
+    saver.exportScalarField(time, error_dir, "T")

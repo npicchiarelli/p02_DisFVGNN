@@ -1,2 +1,2 @@
 # p02_DisFVGNN
-Second PhD project: Dicrete Finite VOlume Graph Neural Network.
+Second PhD project: Discrete Finite Volume Graph Neural Network.

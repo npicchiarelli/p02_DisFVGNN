@@ -204,10 +204,13 @@ def parse_internal_fields_alltimes(case_dir, fieldnames):
     return internal_fields
 
 def parse_boundary_fields_alltimes(case_dir, fieldnames, excluded_patches=None):
-    # initial encoding of excluded_patches, make it consistent with the encoding of the patch names in the smithers mesh
-    for i,patch in enumerate(excluded_patches):
-        if not isinstance(patch, bytes):
-            excluded_patches[i] = bytes(patch, "utf-8")
+    # initial encoding of excluded_patches, make it consistent with the encoding of the patch names in the smithers mesh.
+    # Build a NEW list rather than mutating the caller's: callers (e.g. the parametric loop) reuse the same list across
+    # meshes, and in-place byte conversion breaks the string-vs-bytes comparisons in add_boundary_points on later meshes.
+    excluded_patches = [
+        p if isinstance(p, bytes) else bytes(p, "utf-8")
+        for p in (excluded_patches or [])
+    ]
 
     boundary_fields = {}
     mesh = FoamMesh(case_dir)

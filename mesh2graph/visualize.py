@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import networkx as nx
 import plotly.graph_objects as go
-
+import numpy as np
 import torch_geometric
 
 def plot_graph(graph, savepath:str=None):
@@ -31,7 +31,7 @@ def plot_graphs_3d(graphs, titles=None, savepath: str = None):
     if titles is None:
         titles = [f"Graph {i+1}" for i in range(n)]
 
-    colors = ['steelblue', 'mediumseagreen', 'mediumpurple', 'orange']
+    colors = ['#7a4444', '#0d2448', 'mediumpurple', 'orange']
 
     fig = go.Figure()
 
@@ -72,23 +72,52 @@ def plot_graphs_3d(graphs, titles=None, savepath: str = None):
             showlegend=True
         ))
 
+    # Bare canvas: no title, axes or margins, transparent background, so the
+    # export drops straight into a figure.
+    _blank_axis = dict(
+        title='', showbackground=False, showgrid=False,
+        zeroline=False, showticklabels=False, showspikes=False,
+        visible=False
+    )
     fig.update_layout(
-        title='3D Graph',
+        title='',
         width=1920,
         height=1080,
+        paper_bgcolor='rgba(0,0,0,0)',
         scene=dict(
-            xaxis=dict(title='X', showbackground=False),
-            yaxis=dict(title='Y', showbackground=False),
-            zaxis=dict(title='Z', showbackground=False),
+            bgcolor='rgba(0,0,0,0)',
+            xaxis=_blank_axis,
+            yaxis=_blank_axis,
+            zaxis=_blank_axis,
             aspectmode='data'
         ),
-        margin=dict(l=0, r=0, t=40, b=0)
+        showlegend=False,
+        margin=dict(l=0, r=0, t=0, b=0)
     )
+
+
+    # ParaView values
+    position    = np.array([0.0855408, 0.0830408, 0.0747909])
+    focal_point = np.array([0.0,      -0.0025,   -0.0107499])
+    view_up     = np.array([-0.408248, 0.816497, -0.408248])
+
+    # Direction and distance
+    direction = position - focal_point
+    distance  = np.linalg.norm(direction)
+    eye_norm  = direction / distance  # unit vector, then scale for Plotly
+
+    scale = 2.0  # Plotly's default "comfortable" distance
+
     camera = dict(
-    up=dict(x=0, y=0, z=1),
-    center=dict(x=0, y=0, z=0),
-    eye=dict(x=-5., y=0., z=4)
-)
+        up=dict(x=view_up[0],        y=view_up[1],        z=view_up[2]),
+        center=dict(x=0, y=0, z=0),  # Plotly centers on data automatically
+        eye=dict(
+            x=eye_norm[0] * scale,
+            y=eye_norm[1] * scale,
+            z=eye_norm[2] * scale
+        )
+    )
+
     fig.update_layout(scene_camera=camera)
 
     if savepath:

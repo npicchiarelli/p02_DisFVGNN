@@ -217,6 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# test directory
-
-tests*
+# test scratch directory (fixtures + generated data, not the eval scripts)
+# Anchored: bare `tests*` also swallowed any future file named tests<something>.
+/tests/

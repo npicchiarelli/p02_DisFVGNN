@@ -127,7 +127,23 @@ def load_non_orthogonality(directory: str) -> torch.Tensor:
 
     return non_orthogonality
 
-def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx_patch: bool = False, verbose: bool = False) -> Data:
+def load_face_owners(directory: str) -> np.ndarray:
+    """Owner cell of every face, indexed by global face index.
+
+    OpenFOAM stores the points of a face ordered counter-clockwise when seen from
+    inside the owner cell, so the Sf built from that ordering points OUT of the
+    owner and INTO the neighbour (for a boundary face, out of the domain). The
+    owner is therefore the only thing needed to decide the sign of Sf on a given
+    directed edge. See the OpenFOAM user guide, 4.1 "Mesh description".
+
+    Parsed straight from constant/polyMesh/owner: much cheaper than building a
+    full FoamMesh, which also reads the points/faces and constructs the cells.
+    """
+    owner_file = os.path.join(directory, "constant", "polyMesh", "owner")
+    return np.asarray(FoamMesh.parse_mesh_file(
+        owner_file, FoamMesh.parse_owner_neighbour_content))
+
+def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx_patch: bool = False, verbose: bool = False, boundary_edge_dir: str = "both") -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
     names = of_binder.getPatchName()
@@ -156,8 +172,30 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, 
                         u.append(i)
                         v.append(boundary_index)
     
-    coo_index_b = torch.stack([torch.tensor(u), torch.tensor(v)], dim=0)
-    x_b = torch.cat([graph_vc.x, torch.from_numpy(np.array(v)).unsqueeze(1)])
+    # Orientation of the cell <-> boundary-node edges, named from the BOUNDARY
+    # NODE's point of view. PyG's default source_to_target flow aggregates at
+    # edge_index[1], so:
+    #   "source" : boundary_node -> cell. The boundary node only emits, so a
+    #              fixedValue BC propagates inward but the boundary node itself
+    #              is never updated from the interior.
+    #   "sink"   : cell -> boundary_node. The boundary node only receives, so the
+    #              BC never reaches the interior and has no effect on the
+    #              prediction.
+    #   "both"   : both directions (default), matching how parse_vertex_centered
+    #              emits every internal face twice.
+    cells, bnd_nodes = u, v
+    if boundary_edge_dir == "both":
+        src, dst, face_rep = cells + bnd_nodes, bnd_nodes + cells, 2
+    elif boundary_edge_dir == "source":
+        src, dst, face_rep = bnd_nodes, cells, 1
+    elif boundary_edge_dir == "sink":
+        src, dst, face_rep = cells, bnd_nodes, 1
+    else:
+        raise ValueError("boundary_edge_dir must be 'source', 'sink' or 'both', "
+                         f"got {boundary_edge_dir!r}")
+
+    coo_index_b = torch.stack([torch.tensor(src), torch.tensor(dst)], dim=0)
+    x_b = torch.cat([graph_vc.x, torch.from_numpy(np.array(bnd_nodes)).unsqueeze(1)])
 
     pos_b = torch.cat([graph_vc.pos, torch.from_numpy(np.array([pos_dict[i] for i in range(mesh.num_cell, boundary_index+1)]))], dim=0)
 
@@ -166,7 +204,10 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, 
     graph_vc_boundary = Data(x = x_b, pos = pos_b, edge_index=edge_index_b)
 
     if return_face_idx_patch:
-        return graph_vc_boundary, boundary_faces_idx, patches
+        # One face index per edge, in edge order. Under "both" the mirrored half
+        # reuses the same faces, mirroring how parse_vertex_centered repeats an
+        # internal face index once per direction.
+        return graph_vc_boundary, boundary_faces_idx * face_rep, patches
     else:
         return graph_vc_boundary
 

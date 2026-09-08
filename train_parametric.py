@@ -28,14 +28,17 @@ case_name = "parametric"
 # analogue of the flange's excluded patch1/patch3 — and fixedValue on
 # (sides, holes), which become the boundary nodes of the graph.
 excluded_patches = ["top", "bottom", "cbores"]
-epochs = 200
+epochs = 2000
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
 
 # Derived, never hand-written: exp_name names the checkpoint directory and is
 # parsed back by test_parametric.py, so it must always describe the run that
 # actually ran. Building it from the switches above keeps the two in step.
-exp_name = f"history{history}_mesh" + ("" if use_fv_features else "_nofv")
+# The _nofv suffix must stay LAST: test_parametric.py recovers the
+# edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
+# after it would silently be read back as an FV run.
+exp_name = f"history{history}_mesh_correct_edge_attr" + ("" if use_fv_features else "_nofv")
 
 # The split is over MESHES, not over time: each mesh contributes its full
 # time sequence to exactly one of train/val/test. The test meshes are

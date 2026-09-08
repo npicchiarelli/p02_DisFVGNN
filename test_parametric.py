@@ -44,7 +44,7 @@ case_name = "parametric"
 # history / edge-feature setup its model was trained with. Override with the
 # FVGNN_EXP / FVGNN_HISTORY env vars, e.g. to evaluate the history=1 model:
 #   FVGNN_EXP=history1_mesh_nofv FVGNN_HISTORY=1 python test_parametric.py
-exp_name = os.environ.get("FVGNN_EXP", "history1_mesh")
+exp_name = os.environ.get("FVGNN_EXP", "history1_mesh_correct_edge_attr")
 excluded_patches = ["top", "bottom", "cbores"]
 history = int(os.environ.get("FVGNN_HISTORY", "1"))
 # train_parametric.py appends _nofv when it drops the FV edge features, so the

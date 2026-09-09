@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import json
 import shutil
 from glob import glob
 import time
@@ -113,6 +114,21 @@ print(f"Found {n_meshes} parametric meshes. Splitting over geometry:")
 print(f"  train meshes ({len(train_mesh_idx)}): {names_of(train_mesh_idx)}")
 print(f"  val   meshes ({len(val_mesh_idx)}): {names_of(val_mesh_idx)}")
 print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")
+
+# By name, not index: randperm depends on n_meshes, so adding a mesh redraws
+# the whole split rather than appending to it.
+split_path = checkpoint_dir / "mesh_split.json"
+with open(split_path, "w") as fh:
+    json.dump({
+        "seed": seed,
+        "n_meshes": n_meshes,
+        "train_mesh_frac": train_mesh_frac,
+        "val_mesh_frac": val_mesh_frac,
+        "train": names_of(train_mesh_idx),
+        "val":   names_of(val_mesh_idx),
+        "test":  names_of(test_mesh_idx),
+    }, fh, indent=2)
+print(f"  split saved to {split_path}")
 
 
 # ── 2. Load every mesh's data ───────────────────────────────────────────────

@@ -16,6 +16,7 @@ must be kept in sync with the training script.
 
 import os
 from pathlib import Path
+import json
 import re
 import shutil
 from glob import glob
@@ -87,20 +88,51 @@ n_meshes = len(case_dirs)
 if n_meshes == 0:
     raise RuntimeError(f"No model_* cases found in {parametric_dir}")
 
-perm = torch.randperm(n_meshes, generator=torch.Generator().manual_seed(seed)).tolist()
-n_train = round(n_meshes * train_mesh_frac)
-n_val   = round(n_meshes * val_mesh_frac)
-
-train_mesh_idx = perm[:n_train]
-val_mesh_idx   = perm[n_train:n_train + n_val]
-test_mesh_idx  = perm[n_train + n_val:]
-
-
 def names_of(idxs):
     return [os.path.basename(case_dirs[i]) for i in idxs]
 
 
-print(f"Found {n_meshes} parametric meshes. Reproducing the geometry split:")
+split_path = checkpoint_dir / "mesh_split.json"
+by_name = {os.path.basename(d): i for i, d in enumerate(case_dirs)}
+
+if split_path.exists():
+    with open(split_path) as fh:
+        split = json.load(fh)
+    missing = [m for m in split["train"] + split["val"] + split["test"]
+               if m not in by_name]
+    if missing:
+        raise RuntimeError(
+            f"{split_path} names meshes that are not in {parametric_dir}: {missing}"
+        )
+    train_mesh_idx = [by_name[m] for m in split["train"]]
+    val_mesh_idx   = [by_name[m] for m in split["val"]]
+    test_mesh_idx  = [by_name[m] for m in split["test"]]
+    print(f"Found {n_meshes} parametric meshes. Split loaded from {split_path} "
+          f"(recorded at n_meshes={split['n_meshes']}):")
+else:
+    n_split = os.environ.get("FVGNN_N_MESHES")
+    if n_split is None:
+        raise FileNotFoundError(
+            f"No {split_path}, so the mesh split cannot be reproduced.\n"
+            f"There are {n_meshes} meshes today; re-drawing randperm over that "
+            f"count is only correct if the checkpoint was trained with exactly "
+            f"{n_meshes}.\n"
+            f"Either re-run train_parametric.py (it now writes the file), or "
+            f"set FVGNN_N_MESHES to the count used at training time, e.g.\n"
+            f"    FVGNN_N_MESHES=10 python test_parametric.py\n"
+            f"which reproduces the original 10-mesh study "
+            f"(test = model_003, model_007)."
+        )
+    n_split = int(n_split)
+    perm = torch.randperm(
+        n_split, generator=torch.Generator().manual_seed(seed)).tolist()
+    n_train = round(n_split * train_mesh_frac)
+    n_val   = round(n_split * val_mesh_frac)
+    train_mesh_idx = perm[:n_train]
+    val_mesh_idx   = perm[n_train:n_train + n_val]
+    test_mesh_idx  = perm[n_train + n_val:]
+    print(f"Found {n_meshes} parametric meshes. No recorded split; re-drawing "
+          f"over FVGNN_N_MESHES={n_split}:")
 print(f"  train meshes ({len(train_mesh_idx)}): {names_of(train_mesh_idx)}")
 print(f"  val   meshes ({len(val_mesh_idx)}): {names_of(val_mesh_idx)}")
 print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")

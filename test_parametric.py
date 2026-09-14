@@ -213,17 +213,22 @@ print(f"Using device: {device}")
 any_graph = next(iter(test_graphs.values()))
 in_node_feat = history + any_graph.node_attr.shape[1]   # T history + geometry
 in_edge_feat = any_graph.edge_attr.shape[1]             # 10, or 4 under _nofv
+state = torch.load(model_path, map_location=device)
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
     hidden_dim=64,
     out_dim=1,
     n_mp_layers=1,
+    # Residual checkpoints carry their delta_scale buffer and absolute-T ones
+    # do not, so the checkpoint itself says which model to rebuild.
+    residual="delta_scale" in state,
+    history=history,
 ).to(device)
-model.load_state_dict(torch.load(model_path, map_location=device))
+model.load_state_dict(state)
 model.eval()
-print(f"Loaded model with {sum(p.numel() for p in model.parameters()):.4e} parameters "
-      f"from {model_path}")
+print(f"Loaded {'residual' if model.residual else 'absolute-T'} model with "
+      f"{sum(p.numel() for p in model.parameters()):.4e} parameters from {model_path}")
 
 # ── 6. Simulation wall-clock helper ─────────────────────────────────────────
 

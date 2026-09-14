@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import shutil
 from glob import glob
+import sys
 import time
 
 import numpy as np
@@ -22,6 +23,7 @@ from models.autoregressive_training import rollout
 
 torch.default_dtype = torch.float32
 
+
 # ── 0. Configuration ──────────────────────────────────────────────────
 
 case_name = "parametric"
@@ -29,9 +31,10 @@ case_name = "parametric"
 # analogue of the flange's excluded patch1/patch3 — and fixedValue on
 # (sides, holes), which become the boundary nodes of the graph.
 excluded_patches = ["top", "bottom", "cbores"]
-epochs = 2000
+epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
+residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of T^{n+1}
 
 # Derived, never hand-written: exp_name names the checkpoint directory and is
 # parsed back by test_parametric.py, so it must always describe the run that
@@ -39,12 +42,26 @@ use_fv_features = True   # False → keep only the first 4 (geometry) edge featu
 # The _nofv suffix must stay LAST: test_parametric.py recovers the
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
-exp_name = f"history{history}_mesh_correct_edge_attr" + ("" if use_fv_features else "_nofv")
+exp_name = (f"history{history}_msg_dim2"
+            + ("_residual" if residual else "")
+            + ("" if use_fv_features else "_nofv"))
 
 # The split is over MESHES, not over time: each mesh contributes its full
 # time sequence to exactly one of train/val/test. The test meshes are
 # geometries the network never sees during training, so the test error
 # measures geometric adaptability.
+#
+# Fixed by name. train/val are exactly those of the earlier runs
+# (parametric_history1_mesh_correct_edge_attr, parametric_history1_mesh_nofv),
+# in their recorded order, so results compare like for like; model_010/011
+# postdate those runs and join their test set. Set to None to draw a random
+# split from the fractions and seed below instead — but that redraws the whole
+# split whenever a mesh is added.
+fixed_split = {
+    "train": ["model_002", "model_006", "model_001", "model_008", "model_004", "model_005"],
+    "val":   ["model_000", "model_009"],
+    "test":  ["model_003", "model_007", "model_010", "model_011"],
+}
 train_mesh_frac = 0.6
 val_mesh_frac   = 0.2
 # remainder of the meshes → test
@@ -99,35 +116,51 @@ n_meshes = len(case_dirs)
 if n_meshes == 0:
     raise RuntimeError(f"No model_* cases found in {parametric_dir}")
 
-perm = torch.randperm(n_meshes, generator=torch.Generator().manual_seed(seed)).tolist()
-n_train = round(n_meshes * train_mesh_frac)
-n_val   = round(n_meshes * val_mesh_frac)
-
-train_mesh_idx = perm[:n_train]
-val_mesh_idx   = perm[n_train:n_train + n_val]
-test_mesh_idx  = perm[n_train + n_val:]
-
 def names_of(idxs):
     return [os.path.basename(case_dirs[i]) for i in idxs]
 
-print(f"Found {n_meshes} parametric meshes. Splitting over geometry:")
+if fixed_split is not None:
+    by_name = {os.path.basename(d): i for i, d in enumerate(case_dirs)}
+    listed = fixed_split["train"] + fixed_split["val"] + fixed_split["test"]
+    missing = [m for m in listed if m not in by_name]
+    if missing:
+        raise RuntimeError(f"fixed_split names meshes that are not in {parametric_dir}: {missing}")
+    if len(set(listed)) != len(listed):
+        raise RuntimeError("fixed_split puts a mesh in more than one of train/val/test")
+    train_mesh_idx = [by_name[m] for m in fixed_split["train"]]
+    val_mesh_idx   = [by_name[m] for m in fixed_split["val"]]
+    test_mesh_idx  = [by_name[m] for m in fixed_split["test"]]
+    unused = sorted(set(by_name) - set(listed))
+    print(f"Found {n_meshes} parametric meshes. Using fixed_split"
+          + (f" (not used: {unused}):" if unused else ":"))
+else:
+    perm = torch.randperm(n_meshes, generator=torch.Generator().manual_seed(seed)).tolist()
+    n_train = round(n_meshes * train_mesh_frac)
+    n_val   = round(n_meshes * val_mesh_frac)
+
+    train_mesh_idx = perm[:n_train]
+    val_mesh_idx   = perm[n_train:n_train + n_val]
+    test_mesh_idx  = perm[n_train + n_val:]
+    print(f"Found {n_meshes} parametric meshes. Random split over geometry:")
+
 print(f"  train meshes ({len(train_mesh_idx)}): {names_of(train_mesh_idx)}")
 print(f"  val   meshes ({len(val_mesh_idx)}): {names_of(val_mesh_idx)}")
 print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")
 
 # By name, not index: randperm depends on n_meshes, so adding a mesh redraws
 # the whole split rather than appending to it.
+split_record = {
+    "n_meshes": n_meshes,
+    "train": names_of(train_mesh_idx),
+    "val":   names_of(val_mesh_idx),
+    "test":  names_of(test_mesh_idx),
+}
+if fixed_split is None:   # seed and fractions only describe a random draw
+    split_record.update(seed=seed, train_mesh_frac=train_mesh_frac,
+                        val_mesh_frac=val_mesh_frac)
 split_path = checkpoint_dir / "mesh_split.json"
 with open(split_path, "w") as fh:
-    json.dump({
-        "seed": seed,
-        "n_meshes": n_meshes,
-        "train_mesh_frac": train_mesh_frac,
-        "val_mesh_frac": val_mesh_frac,
-        "train": names_of(train_mesh_idx),
-        "val":   names_of(val_mesh_idx),
-        "test":  names_of(test_mesh_idx),
-    }, fh, indent=2)
+    json.dump(split_record, fh, indent=2)
 print(f"  split saved to {split_path}")
 
 
@@ -159,6 +192,18 @@ normalizer.fit(
     node_attr=torch.cat([static_graphs[i].node_attr for i in train_mesh_idx], dim=0),
 )
 normalizer.save(os.path.join(checkpoint_dir, "normalizer.pt"))
+
+# Size of the one-step increment in normalized-T units, from the training
+# meshes only. The residual model multiplies its output by this, so the head
+# stays O(1) while predicting a change that is a small fraction of T_std.
+# Differenced per mesh: the concatenated T above would mix meshes.
+sq_sum, n_incr = 0.0, 0
+for i in train_mesh_idx:
+    dT = (T_sequences[i][1:] - T_sequences[i][:-1]).double()
+    sq_sum += dT.pow(2).sum().item()
+    n_incr += dT.numel()
+delta_scale = (sq_sum / n_incr) ** 0.5 / normalizer.T_std.item()
+print(f"delta_scale = rms(dT) / T_std = {delta_scale:.4e}")
 
 # ── 4. Build datasets ───────────────────────────────────────────────────────
 # Each mesh uses its FULL time sequence (split_indices=None → all valid
@@ -197,7 +242,6 @@ val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
 # ── 5. Model & optimiser ────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-
 # Feature dimensions are identical across meshes; take them from the first.
 in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + geometry
 in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
@@ -205,9 +249,13 @@ in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
+    msg_dim=2,
     hidden_dim=64,
     out_dim=1,
     n_mp_layers=1,         # message passing depth
+    residual=residual,
+    history=history,
+    delta_scale=delta_scale,
 ).to(device)
 
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")

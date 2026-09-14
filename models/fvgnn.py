@@ -82,6 +82,10 @@ class FVSurrogate(nn.Module):
     The input node features are first lifted to hidden_dim by a linear encoder,
     so every MP layer sees the same feature size.
     Edge features are encoded once and reused at every layer.
+
+    With residual=True the network predicts the increment and the model adds it
+    back itself:  T^{n+1} = T^n + delta_scale * f(...). The output is still the
+    normalized T^{n+1}, so targets, loss, rollout and evaluation are unchanged.
     """
 
     def __init__(
@@ -93,8 +97,22 @@ class FVSurrogate(nn.Module):
         out_dim: int = 1,
         n_mp_layers: int = 6,
         aggr: str = 'add',
+        residual: bool = False,
+        history: int = 1,          # T^n is column history-1 of data.x (residual only)
+        delta_scale: float = 1.0,  # rms(T^{n+1} - T^n) / T_std (residual only)
     ):
         super().__init__()
+
+        if residual and out_dim != 1:
+            raise ValueError("residual=True adds the output to T^n, so out_dim must be 1")
+        self.residual = residual
+        self.history = history
+        if residual:
+            # A buffer, not a plain attribute: it is saved with the weights, and
+            # loading an absolute-T checkpoint into a residual model (or the
+            # reverse) fails on the missing/unexpected key instead of silently.
+            # Loaders need not know the value — load_state_dict restores it.
+            self.register_buffer("delta_scale", torch.tensor(float(delta_scale)))
 
         # Lift raw features to hidden_dim once
         self.node_encoder = nn.Linear(in_node_feat, hidden_dim)
@@ -130,4 +148,9 @@ class FVSurrogate(nn.Module):
         for layer in self.mp_layers:
             x = layer(x, data.edge_index, edge_attr)    # (N, hidden_dim) → ... → (N, out_dim)
 
-        return x.squeeze(-1)                            # (N,) for scalar T
+        out = x.squeeze(-1)                             # (N,) for scalar T
+        if self.residual:
+            # data.x = [T window oldest -> newest | static node features], in
+            # the same normalized units as the output
+            out = data.x[:, self.history - 1] + self.delta_scale * out
+        return out

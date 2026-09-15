@@ -221,8 +221,10 @@ model = FVSurrogate(
     out_dim=1,
     n_mp_layers=1,
     # Residual checkpoints carry their delta_scale buffer and absolute-T ones
-    # do not, so the checkpoint itself says which model to rebuild.
+    # do not, so the checkpoint itself says which model to rebuild. Likewise
+    # only LayerNorm checkpoints hold node_encoder_norm weights.
     residual="delta_scale" in state,
+    layer_norm="node_encoder_norm.weight" in state,
     history=history,
 ).to(device)
 model.load_state_dict(state)

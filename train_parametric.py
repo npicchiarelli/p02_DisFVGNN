@@ -35,6 +35,7 @@ epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
 residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of T^{n+1}
+layer_norm = True        # LayerNorm after encoders, messages and intermediate node updates
 
 # Derived, never hand-written: exp_name names the checkpoint directory and is
 # parsed back by test_parametric.py, so it must always describe the run that
@@ -42,7 +43,8 @@ residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of
 # The _nofv suffix must stay LAST: test_parametric.py recovers the
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
-exp_name = (f"history{history}_msg_dim2"
+exp_name = (f"history{history}_msg_dim128"
+            + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
             + ("" if use_fv_features else "_nofv"))
 
@@ -249,13 +251,14 @@ in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
-    msg_dim=2,
+    msg_dim=128,
     hidden_dim=64,
     out_dim=1,
     n_mp_layers=1,         # message passing depth
     residual=residual,
     history=history,
     delta_scale=delta_scale,
+    layer_norm=layer_norm,
 ).to(device)
 
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")

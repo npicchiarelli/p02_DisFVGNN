@@ -18,6 +18,7 @@ from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
+from models.msg_regularization import MessageRegularizer
 from soap import SOAP
 from models.autoregressive_training import rollout
 
@@ -35,7 +36,23 @@ epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
 residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of T^{n+1}
-layer_norm = True        # LayerNorm after encoders, messages and intermediate node updates
+layer_norm = False       # LayerNorm after encoders, messages and intermediate node updates
+# ReduceLROnPlateau. It starts stepping only once the message penalty is fully
+# ramped in (for every msg_penalty, so the controls share the schedule), and
+# watches val MSE * exp(alpha * pen / ref) — see MessageRegularizer.plateau_metric.
+lr_scheduler = False
+
+# Message sparsity (models/msg_regularization.py). "none" trains as before and
+# only logs per-channel message statistics; "l1" / "hoyer" also fix the
+# per-channel message scale after every step, so either one with alpha = 0 is
+# the control for the penalty itself. The penalties need layer_norm = False.
+# FVGNN_MSG_PENALTY / FVGNN_MSG_ALPHA override the two for sweeps.
+msg_penalty = os.environ.get("FVGNN_MSG_PENALTY", "none")   # none | l1 | hoyer
+msg_alpha   = float(os.environ.get("FVGNN_MSG_ALPHA", "0"))  # fractional MSE increase per unit of penalty
+msg_warmup  = 20         # epochs with the penalty off; l1 takes its reference over the last one
+msg_ramp    = 10         # epochs of linear ramp up to the full alpha
+if msg_penalty not in MessageRegularizer.KINDS:
+    raise ValueError(f"FVGNN_MSG_PENALTY must be one of {MessageRegularizer.KINDS}, got {msg_penalty!r}")
 
 # Derived, never hand-written: exp_name names the checkpoint directory and is
 # parsed back by test_parametric.py, so it must always describe the run that
@@ -46,6 +63,8 @@ layer_norm = True        # LayerNorm after encoders, messages and intermediate n
 exp_name = (f"history{history}_msg_dim128"
             + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
+            + ("" if lr_scheduler else "_nosched")
+            + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
             + ("" if use_fv_features else "_nofv"))
 
 # The split is over MESHES, not over time: each mesh contributes its full
@@ -264,11 +283,16 @@ model = FVSurrogate(
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")
 
 optimizer = SOAP(model.parameters(), lr=3e-3)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+             if lr_scheduler else None)
+
+msg_reg = MessageRegularizer(model, kind=msg_penalty, alpha=msg_alpha,
+                             warmup=msg_warmup, ramp=msg_ramp)
 
 # ── 6. Training loop ────────────────────────────────────────────────────────
-train_losses = []
+train_losses = []   # MSE only, comparable with val and with unpenalised runs
 val_losses   = []
+lrs          = []   # LR each epoch trained at
 
 pbar = tqdm(range(epochs), desc="Training")
 for epoch in pbar:
@@ -278,13 +302,16 @@ for epoch in pbar:
         batch = batch.to(device)
         optimizer.zero_grad()
         pred = model(batch)                    # (batch_N,)
-        loss = torch.nn.functional.mse_loss(pred, batch.y)
+        mse = torch.nn.functional.mse_loss(pred, batch.y)
+        loss = msg_reg.loss(mse, epoch)        # + message penalty once it ramps in
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        total_loss += loss.item()
+        msg_reg.after_step()                   # message stats, per-channel scale fix
+        total_loss += mse.item()
     train_loss = total_loss / len(train_loader)
     train_losses.append(train_loss)
+    msg_stats = msg_reg.end_epoch(epoch)
 
     # Validation
     model.eval()
@@ -297,11 +324,16 @@ for epoch in pbar:
 
     val_loss /= len(val_loader)
     val_losses.append(val_loss)
-    scheduler.step(val_loss)
-    pbar.set_postfix({"train_loss": f"{train_loss:.4e}", "val_loss": f"{val_loss:.4e}"})
+    lrs.append(optimizer.param_groups[0]["lr"])
+    if scheduler is not None and msg_reg.ramp(epoch) == 1.0:
+        scheduler.step(msg_reg.plateau_metric(val_loss))
+    pbar.set_postfix({"train_loss": f"{train_loss:.4e}", "val_loss": f"{val_loss:.4e}",
+                      "PR": f"{msg_stats['pr']:.1f}"})
 
 np.save(os.path.join(checkpoint_dir, "train_losses.npy"), train_losses)
 np.save(os.path.join(checkpoint_dir, "val_losses.npy"), val_losses)
+np.save(os.path.join(checkpoint_dir, "lrs.npy"), lrs)
+msg_reg.save(os.path.join(checkpoint_dir, "msg_reg_log.npz"))
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, "model.pt"))
 
 # ── 7. Testing and rollout on the held-out (unseen) meshes ──────────────────

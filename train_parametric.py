@@ -68,7 +68,7 @@ if train_seed is not None:
 # The _nofv suffix must stay LAST: test_parametric.py recovers the
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
-exp_name = (f"history{history}_msg_dim128"
+exp_name = (f"history{history}_msg_dim64"
             + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
             + ("" if lr_scheduler else "_nosched")
@@ -264,7 +264,7 @@ loader_kwargs = dict(
     # meshes can reach several million edges; the message-passing MLP keeps
     # ~8 (E, hidden) activations for backprop, which OOMs a 16 GB GPU above
     # ~5M edges. batch_size=4 keeps the worst-case batch well under budget.
-    batch_size=4,
+    batch_size=8,
     num_workers=num_workers,
     pin_memory=torch.cuda.is_available(),
     persistent_workers=num_workers > 0,
@@ -291,7 +291,7 @@ if train_seed is not None:
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
-    msg_dim=128,
+    msg_dim=64,
     hidden_dim=64,
     out_dim=1,
     n_mp_layers=1,         # message passing depth

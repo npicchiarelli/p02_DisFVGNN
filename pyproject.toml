@@ -5,6 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mesh2graph"
 version = "0.1.0"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Our fork's num_cell_bugfix branch, NOT upstream mathLab/Smithers.
+    # Upstream mesh_parser.py computes `num_cell = max(self.owner)`, which is the
+    # highest cell index rather than a count and ignores `neighbour` entirely, so
+    # FoamMesh silently undercounts cells. The branch fixes it to
+    # `max(max(owner), max(neighbour)) + 1`.
+    # NB: the PyPI release `smithers==0.0.1` is useless here -- it predates
+    # mesh_parser.py and has no FoamMesh at all.
+    "smithers @ git+https://github.com/npicchiarelli/Smithers.git@num_cell_bugfix",
+
+    # smithers.io.openfoam imports Ofpp but never declares it, so declare it here.
+    "Ofpp>=0.12",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

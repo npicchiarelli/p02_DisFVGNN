@@ -45,7 +45,10 @@ case_name = "parametric"
 # history / edge-feature setup its model was trained with. Override with the
 # FVGNN_EXP / FVGNN_HISTORY env vars, e.g. to evaluate the history=1 model:
 #   FVGNN_EXP=history1_mesh_nofv FVGNN_HISTORY=1 python test_parametric.py
+# FVGNN_SEED picks the seed_<n> run of an experiment trained with FVGNN_SEED;
+# unset → the unseeded run in the experiment directory itself.
 exp_name = os.environ.get("FVGNN_EXP", "history1_mesh_correct_edge_attr")
+train_seed = os.environ.get("FVGNN_SEED")
 excluded_patches = ["top", "bottom", "cbores"]
 history = int(os.environ.get("FVGNN_HISTORY", "1"))
 # train_parametric.py appends _nofv when it drops the FV edge features, so the
@@ -65,19 +68,24 @@ raw_data_dir = "../raw_data"
 parametric_dir = os.path.join(raw_data_dir, case_name)
 processed_data_dir = Path("../processed_data")
 pdata_casename = f"{case_name}_{exp_name}"
+run_dir = processed_data_dir / pdata_casename
+if train_seed is not None:
+    run_dir = run_dir / f"seed_{int(train_seed)}"
 
-pred_dir  = os.path.join(processed_data_dir, pdata_casename, "predictions")
-error_dir = os.path.join(processed_data_dir, pdata_casename, "errors")
-checkpoint_dir = Path(processed_data_dir / pdata_casename / "checkpoints")
+pred_dir  = os.path.join(run_dir, "predictions")
+error_dir = os.path.join(run_dir, "errors")
+checkpoint_dir = run_dir / "checkpoints"
 
-os.makedirs(pred_dir, exist_ok=True)
-os.makedirs(error_dir, exist_ok=True)
-
+# Checked before creating anything, so a mistyped experiment or seed does not
+# leave an empty run directory behind.
 model_path = os.path.join(checkpoint_dir, "model.pt")
 if not os.path.exists(model_path):
     raise FileNotFoundError(
         f"No trained model at {model_path}. Run train_parametric.py first."
     )
+
+os.makedirs(pred_dir, exist_ok=True)
+os.makedirs(error_dir, exist_ok=True)
 
 
 # ── 1. Reproduce the exact mesh split ───────────────────────────────────────

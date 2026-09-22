@@ -55,7 +55,7 @@ from data_preparation.field import load_fields
 from data_preparation.mesh_dataset import temporal_split
 from data_preparation.normalization import FeatureNormalizer
 from data_preparation.static_graph import build_static_graph
-from models.fvgnn import FVSurrogate
+from models.fvgnn import FVSurrogate, widths_from_state_dict
 from models.message_probe import MessageProbe, fv_flux, paired_edge_index
 
 torch.default_dtype = torch.float32
@@ -156,14 +156,15 @@ for exp_name in exp_names:
         print(f"[{exp_name}] no test samples, skipping.")
         continue
 
+    state = torch.load(model_path, map_location=device)
     model = FVSurrogate(
         in_node_feat=history + static_graph.node_attr.shape[1],
         in_edge_feat=static_graph.edge_attr.shape[1],
-        hidden_dim=64,
+        **widths_from_state_dict(state),
         out_dim=1,
         n_mp_layers=1,
     ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(state)
     model.eval()
 
     # ── 2a. run the test window with the probe attached ────────────────────

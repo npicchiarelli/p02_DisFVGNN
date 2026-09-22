@@ -54,6 +54,14 @@ msg_ramp    = 10         # epochs of linear ramp up to the full alpha
 if msg_penalty not in MessageRegularizer.KINDS:
     raise ValueError(f"FVGNN_MSG_PENALTY must be one of {MessageRegularizer.KINDS}, got {msg_penalty!r}")
 
+# FVGNN_SEED seeds the weight init and the training loader's shuffle order
+# (the mesh split has its own seed below), and writes the run to a seed_<n>
+# subdirectory of the experiment directory, so the seeds of one configuration
+# sit side by side. Unset → unseeded, written to the experiment directory itself.
+train_seed = os.environ.get("FVGNN_SEED")
+if train_seed is not None:
+    train_seed = int(train_seed)
+
 # Derived, never hand-written: exp_name names the checkpoint directory and is
 # parsed back by test_parametric.py, so it must always describe the run that
 # actually ran. Building it from the switches above keeps the two in step.
@@ -92,16 +100,20 @@ raw_data_dir = "../raw_data"
 parametric_dir = os.path.join(raw_data_dir, case_name)
 processed_data_dir = Path("../processed_data")
 pdata_casename = f"{case_name}_{exp_name}"
+run_dir = processed_data_dir / pdata_casename
+if train_seed is not None:
+    run_dir = run_dir / f"seed_{train_seed}"
 
-os.makedirs(os.path.join(processed_data_dir, pdata_casename), exist_ok=True)
+os.makedirs(run_dir, exist_ok=True)
+print(f"Seed: {train_seed}, writing to {run_dir}")
 
-pred_dir  = os.path.join(processed_data_dir, pdata_casename, "predictions")
-error_dir = os.path.join(processed_data_dir, pdata_casename, "errors")
+pred_dir  = os.path.join(run_dir, "predictions")
+error_dir = os.path.join(run_dir, "errors")
 
 os.makedirs(pred_dir, exist_ok=True)
 os.makedirs(error_dir, exist_ok=True)
 
-checkpoint_dir = Path(processed_data_dir / pdata_casename / "checkpoints")
+checkpoint_dir = run_dir / "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # Preprocessed meshes (static graph + T sequence) are cached here so that
@@ -263,10 +275,19 @@ val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
 # ── 5. Model & optimiser ────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+# FVGNN_REQUIRE_CUDA=1 (launcher.sh sets it) turns the silent CPU fallback into
+# an error: an unattended run on the CPU takes ~1.5 days instead of hours.
+if device.type != "cuda" and os.environ.get("FVGNN_REQUIRE_CUDA") == "1":
+    raise RuntimeError("FVGNN_REQUIRE_CUDA=1 but CUDA is not available "
+                       "(another user holding the MPS server?)")
 # Feature dimensions are identical across meshes; take them from the first.
 in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + geometry
 in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
 
+if train_seed is not None:
+    # Right before the model: the init, and through the train loader's sampler
+    # every epoch's shuffle order, are drawn from the global RNG after this.
+    torch.manual_seed(train_seed)
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,

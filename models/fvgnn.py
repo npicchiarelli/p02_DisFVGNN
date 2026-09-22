@@ -3,6 +3,16 @@ import torch.nn as nn
 from torch_geometric.nn import MessagePassing
 
 
+def widths_from_state_dict(state) -> dict:
+    """hidden_dim, msg_dim and mlp_hidden of the FVSurrogate a state_dict was
+    saved from, as keyword arguments for its constructor."""
+    return dict(
+        hidden_dim=state["node_encoder.weight"].shape[0],
+        msg_dim=state["mp_layers.0.msg_fnc.6.weight"].shape[0],
+        mlp_hidden=state["mp_layers.0.msg_fnc.0.weight"].shape[0],
+    )
+
+
 class FiniteVolumeGraphNet(MessagePassing):
     """
     Graph Network for FV mesh surrogate.
@@ -106,6 +116,12 @@ class FVSurrogate(nn.Module):
     With layer_norm=True a LayerNorm follows both encoders, every message MLP
     and every intermediate node MLP, as in MeshGraphNets. The last node MLP is
     left plain: it decodes T, and a LayerNorm over one feature is a constant.
+
+    mlp_hidden is the width of the message and node MLPs, hidden_dim by
+    default. It exists for the checkpoints trained before hidden_dim reached
+    the MLPs: those were built with hidden_dim=64 but got the 128-wide MLPs of
+    FiniteVolumeGraphNet's default. Rebuild a checkpoint with
+    widths_from_state_dict rather than from the training script's hidden_dim.
     """
 
     def __init__(
@@ -114,6 +130,7 @@ class FVSurrogate(nn.Module):
         in_edge_feat: int,     # 10
         hidden_dim: int = 128,
         msg_dim: int = 128,
+        mlp_hidden: int | None = None,   # None → hidden_dim
         out_dim: int = 1,
         n_mp_layers: int = 6,
         aggr: str = 'add',
@@ -126,6 +143,8 @@ class FVSurrogate(nn.Module):
 
         if residual and out_dim != 1:
             raise ValueError("residual=True adds the output to T^n, so out_dim must be 1")
+        if mlp_hidden is None:
+            mlp_hidden = hidden_dim
         self.residual = residual
         self.history = history
         if residual:
@@ -150,6 +169,7 @@ class FVSurrogate(nn.Module):
                 e_f=hidden_dim,
                 msg_dim=msg_dim,
                 out_dim=hidden_dim,
+                hidden=mlp_hidden,
                 aggr=aggr,
                 msg_norm=layer_norm,
                 node_norm=layer_norm,
@@ -164,6 +184,7 @@ class FVSurrogate(nn.Module):
                 e_f=hidden_dim,
                 msg_dim=msg_dim,
                 out_dim=out_dim,
+                hidden=mlp_hidden,
                 aggr=aggr,
                 msg_norm=layer_norm,
             )

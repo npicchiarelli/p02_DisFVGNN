@@ -42,7 +42,7 @@ from data_preparation.normalization import FeatureNormalizer
 from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
-from models.fvgnn import FVSurrogate
+from models.fvgnn import FVSurrogate, widths_from_state_dict
 from models.autoregressive_training import rollout
 
 torch.default_dtype = torch.float32
@@ -190,14 +190,15 @@ for exp_name in exp_names:
     in_node_feat = history + static_graph.node_attr.shape[1]
     in_edge_feat = static_graph.edge_attr.shape[1]
 
+    state = torch.load(model_path, map_location=device)
     model = FVSurrogate(
         in_node_feat=in_node_feat,
         in_edge_feat=in_edge_feat,
-        hidden_dim=64,
+        **widths_from_state_dict(state),
         out_dim=1,
         n_mp_layers=1,
     ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(state)
     model.eval()
     print(f"Loaded model with {sum(p.numel() for p in model.parameters()):.4e} "
           f"parameters from {model_path}")

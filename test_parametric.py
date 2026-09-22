@@ -33,7 +33,7 @@ from data_preparation.normalization import FeatureNormalizer
 from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
-from models.fvgnn import FVSurrogate
+from models.fvgnn import FVSurrogate, widths_from_state_dict
 from models.autoregressive_training import rollout
 
 torch.default_dtype = torch.float32
@@ -217,7 +217,7 @@ state = torch.load(model_path, map_location=device)
 model = FVSurrogate(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
-    hidden_dim=64,
+    **widths_from_state_dict(state),
     out_dim=1,
     n_mp_layers=1,
     # Residual checkpoints carry their delta_scale buffer and absolute-T ones

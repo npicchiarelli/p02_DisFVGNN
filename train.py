@@ -53,7 +53,8 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 
 # ── 1. Load your mesh data ──────────────────────────────────────────────────
 
-static_graph = build_static_graph(case_dir, excluded_patches)
+# Flange runs keep point-mean boundary nodes.
+static_graph = build_static_graph(case_dir, excluded_patches, boundary_pos="point_mean")
 T_sequence = load_fields(case_dir, 'T', excluded_patches=excluded_patches)
 print("Static graph:", static_graph)
 print("T sequence shape:", T_sequence.shape)  # Should be (T, N)

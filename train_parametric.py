@@ -14,6 +14,7 @@ from tqdm import tqdm
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
+from data_preparation.static_graph import save_graph_config
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
@@ -34,6 +35,10 @@ excluded_patches = ["top", "bottom", "cbores"]
 epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
+# Boundary-node position, "cf" or "point_mean" (legacy); see add_boundary_points.
+boundary_pos = os.environ.get("FVGNN_BOUNDARY_POS", "cf")
+if boundary_pos not in ("cf", "point_mean"):
+    raise ValueError(f"FVGNN_BOUNDARY_POS must be 'cf' or 'point_mean', got {boundary_pos!r}")
 residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of T^{n+1}
 layer_norm = False       # LayerNorm after encoders, messages and intermediate node updates
 # ReduceLROnPlateau. It starts stepping only once the message penalty is fully
@@ -67,11 +72,13 @@ if train_seed is not None:
 # The _nofv suffix must stay LAST: test_parametric.py recovers the
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
+# _cf keeps Cf runs apart from the untagged point_mean ones.
 exp_name = (f"history{history}_msg_dim64"
             + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
             + ("" if lr_scheduler else "_nosched")
             + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
+            + ("_cf" if boundary_pos == "cf" else "")
             + ("" if use_fv_features else "_nofv"))
 
 # The split is over MESHES, not over time: each mesh contributes its full
@@ -175,6 +182,7 @@ split_path = checkpoint_dir / "mesh_split.json"
 with open(split_path, "w") as fh:
     json.dump(split_record, fh, indent=2)
 print(f"  split saved to {split_path}")
+save_graph_config(checkpoint_dir, boundary_pos, excluded_patches)
 
 
 # ── 2. Load every mesh's data ───────────────────────────────────────────────
@@ -184,8 +192,8 @@ T_sequences   = []
 for case_dir in case_dirs:
     name = os.path.basename(case_dir)
     print(f"Loading {name} ...")
-    g, T = load_mesh_cached(case_dir, excluded_patches, preproc_cache_dir,
-                            use_cache=use_cache)
+    g, T = load_mesh_cached(case_dir, excluded_patches, boundary_pos,
+                            preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
     static_graphs.append(g)

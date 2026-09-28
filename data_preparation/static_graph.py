@@ -1,3 +1,6 @@
+import json
+import os
+
 import torch
 import numpy as np
 from torch_geometric.data import Data
@@ -7,14 +10,34 @@ from smithers.io.openfoam import FoamMesh
 from smithers.io.openfoam import field_parser
 
 
+# Saved with each checkpoint: how its graphs were built.
+GRAPH_CONFIG = "graph_config.json"
+
+
+def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches):
+    with open(os.path.join(checkpoint_dir, GRAPH_CONFIG), "w") as fh:
+        json.dump({"boundary_pos": boundary_pos,
+                   "excluded_patches": list(excluded_patches)}, fh, indent=2)
+
+
+def load_graph_config(checkpoint_dir) -> dict:
+    # No file: a checkpoint older than graph_config.json, hence point_mean.
+    path = os.path.join(checkpoint_dir, GRAPH_CONFIG)
+    if not os.path.exists(path):
+        return {"boundary_pos": "point_mean"}
+    with open(path) as fh:
+        return json.load(fh)
+
 
 def build_static_graph(case_dir,
                        excluded_patches,
-                       boundary_edge_dir: str = "both") -> Data:
+                       boundary_edge_dir: str = "both",
+                       boundary_pos: str = "cf") -> Data:
     # boundary_edge_dir orients the cell <-> boundary-node edges, named from the
     # boundary node's point of view: "source" (BC propagates inward only),
     # "sink" (boundary node only receives, so the BC cannot affect the
     # prediction), or "both" (default). See add_boundary_points.
+    # boundary_pos: "cf" (default) or "point_mean", see add_boundary_points.
 
     #-------------------------------------NODES---------------------------------------------
 
@@ -26,7 +49,7 @@ def build_static_graph(case_dir,
     node_type = torch.zeros(N_int, 2, dtype=torch.float32)
     node_type[:,0] = 1.0 # One hot encoding for internal or boundary type. Only internal nodes at this point
 
-    static_graph, boundary_faces_idx, patches = add_boundary_points(static_graph, case_dir, excluded_patches, return_face_idx_patch=True, boundary_edge_dir=boundary_edge_dir)
+    static_graph, boundary_faces_idx, patches = add_boundary_points(static_graph, case_dir, excluded_patches, return_face_idx_patch=True, boundary_edge_dir=boundary_edge_dir, boundary_pos=boundary_pos)
     N_bnd = static_graph.num_nodes - N_int
 
     bnd_type = torch.zeros(N_bnd, 2, dtype=torch.float32)
@@ -77,16 +100,12 @@ def build_static_graph(case_dir,
     Sk = Sk[innner_faces_idx+boundary_faces_idx]
     No = No[innner_faces_idx+boundary_faces_idx]
 
-    # getNonOrthogonality in getter_of.C hardcodes every boundary face to 1.0
-    # ("perfectly orthogonal") because a boundary face has no neighbour cell.
-    # That asserts perfect orthogonality exactly where the geometry is worst: on
-    # the parametric meshes the true value reaches cos ~ 0.17 (80 deg), so the
-    # feature is a dead constant on precisely the edges that carry the boundary
-    # condition. Recompute it with the boundary NODE (the face centre) standing
-    # in for the missing neighbour centre — the same definition OpenFOAM uses
-    # internally, cos(Sf, C_neighbour - C_owner). Sf and dist_vec are both
-    # oriented source -> target, so the ratio is invariant under edge direction
-    # and matches the internal-face values to ~1e-5 (0/C is ascii, writePrecision 6).
+    # getNonOrthogonality (getter_of.C), like OpenFOAM, sets boundary faces to
+    # 1.0: they have no neighbour cell. That hides the worst angles (cos ~ 0.17
+    # on the parametric meshes), so recompute cos(Sf, d) with the boundary node
+    # standing in for the neighbour centre, as for internal faces. Sf and
+    # dist_vec are both oriented source -> target, so the ratio does not depend
+    # on edge direction. With "cf", |d| * cos equals OpenFOAM's 1/deltaCoeffs.
     is_boundary_edge = (src >= N_int) | (dst >= N_int)
     cos_ortho = (surface_area_vec.double() * dist_vec.double()).sum(dim=1, keepdim=True) / (
         surface_area_vec_norm.double() * dist_norm.double())

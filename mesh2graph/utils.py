@@ -143,11 +143,20 @@ def load_face_owners(directory: str) -> np.ndarray:
     return np.asarray(FoamMesh.parse_mesh_file(
         owner_file, FoamMesh.parse_owner_neighbour_content))
 
-def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx_patch: bool = False, verbose: bool = False, boundary_edge_dir: str = "both") -> Data:
+def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, return_face_idx_patch: bool = False, verbose: bool = False, boundary_edge_dir: str = "both", boundary_pos: str = "cf") -> Data:
 
     of_binder = getter_of([".", "-case", f"{directory}"])
     names = of_binder.getPatchName()
-    
+
+    # Boundary-node position: "cf" = OpenFOAM's face centre, "point_mean" = mean
+    # of the face points (legacy; off Cf, in the face plane, on irregular faces).
+    if boundary_pos == "cf":
+        Cf = {name: np.asarray(CfPatch)[:, 0].reshape(-1, 3)
+              for name, CfPatch in zip(names, of_binder.getCf())}
+    elif boundary_pos != "point_mean":
+        raise ValueError("boundary_pos must be 'cf' or 'point_mean', "
+                         f"got {boundary_pos!r}")
+
     mesh = FoamMesh(directory)
     u,v = [], []
     if return_face_idx_patch:
@@ -165,7 +174,12 @@ def add_boundary_points(graph_vc: Data, directory: str, excluded_patches: list, 
                         if verbose:
                             print(f"Cell {i} is on the {boundary_name} boundary and has face {face} on the {boundary_name} boundary")
                         boundary_index += 1
-                        pos_dict[boundary_index] = np.mean(mesh.points[mesh.faces[face]], axis=0)
+                        if boundary_pos == "cf":
+                            # getCf() is indexed within the patch
+                            patch_start = mesh.boundary[bytes(boundary_name, "utf-8")].start
+                            pos_dict[boundary_index] = Cf[boundary_name][face - patch_start]
+                        else:
+                            pos_dict[boundary_index] = np.mean(mesh.points[mesh.faces[face]], axis=0)
                         if return_face_idx_patch:
                             boundary_faces_idx.append(face)
                             patches[boundary_name].append(boundary_index)

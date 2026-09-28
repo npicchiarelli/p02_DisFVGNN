@@ -11,10 +11,9 @@ import torch
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
-from data_preparation.field import load_fields
+from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
@@ -116,29 +115,10 @@ os.makedirs(error_dir, exist_ok=True)
 checkpoint_dir = run_dir / "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
-# Preprocessed meshes (static graph + T sequence) are cached here so that
-# re-running the script skips the expensive OpenFOAM parsing — by far the
-# slowest step. The cache is keyed by the excluded-patch set; delete this
-# directory (or set use_cache=False) to force a rebuild after the raw data
-# changes.
-# use_cache = True
-# preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
-# os.makedirs(preproc_cache_dir, exist_ok=True)
-# _excl_key = "-".join(excluded_patches) if excluded_patches else "none"
-
-
-# def load_mesh(case_dir):
-#     """Return (static_graph, T_sequence) for one case, caching to disk."""
-#     name = os.path.basename(case_dir)
-#     cache_file = preproc_cache_dir / f"{name}__T__{_excl_key}.pt"
-#     if use_cache and cache_file.exists():
-#         blob = torch.load(cache_file, weights_only=False)
-#         return blob["graph"], blob["T"]
-#     g = build_static_graph(case_dir, excluded_patches)
-#     T = load_fields(case_dir, "T", excluded_patches=excluded_patches)
-#     if use_cache:
-#         torch.save({"graph": g, "T": T}, cache_file)
-#     return g, T
+# Parsed meshes, shared with test_parametric.py (data_preparation/mesh_cache.py).
+# Clear the directory after changing the raw data.
+use_cache = True
+preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
 
 
 # ── 1. Split the meshes into train / val / test ─────────────────────────────
@@ -204,8 +184,8 @@ T_sequences   = []
 for case_dir in case_dirs:
     name = os.path.basename(case_dir)
     print(f"Loading {name} ...")
-    g = build_static_graph(case_dir, excluded_patches)
-    T = load_fields(case_dir, "T", excluded_patches=excluded_patches)
+    g, T = load_mesh_cached(case_dir, excluded_patches, preproc_cache_dir,
+                            use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
     static_graphs.append(g)

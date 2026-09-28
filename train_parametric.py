@@ -259,11 +259,6 @@ print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}, "
 # pool alive across all epochs instead of re-forking it every epoch.
 num_workers = 4
 loader_kwargs = dict(
-    # Each sample is a FULL mesh, and parametric meshes vary ~6x in size
-    # (up to ~336k edges). batch_size counts graphs, so a batch of large
-    # meshes can reach several million edges; the message-passing MLP keeps
-    # ~8 (E, hidden) activations for backprop, which OOMs a 16 GB GPU above
-    # ~5M edges. batch_size=4 keeps the worst-case batch well under budget.
     batch_size=8,
     num_workers=num_workers,
     pin_memory=torch.cuda.is_available(),
@@ -293,6 +288,7 @@ model = FVSurrogate(
     in_edge_feat=in_edge_feat,
     msg_dim=64,
     hidden_dim=64,
+    mlp_hidden=128,
     out_dim=1,
     n_mp_layers=1,         # message passing depth
     residual=residual,

@@ -27,10 +27,9 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from data_preparation.field import load_fields
+from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate, widths_from_state_dict
@@ -148,11 +147,15 @@ print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")
 
 # ── 2. Mesh loader (matches train_parametric.py, incl. edge_attr slicing) ───
 
+# Shared with train_parametric.py (data_preparation/mesh_cache.py).
+use_cache = True
+preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
+
+
 def load_mesh(case_dir):
-    """Return (static_graph, T_sequence) for one case, with the same edge
-    features training used — all 10, or the first 4 (geometry) under _nofv."""
-    g = build_static_graph(case_dir, excluded_patches)
-    T = load_fields(case_dir, "T", excluded_patches=excluded_patches)
+    """Return (static_graph, T_sequence) for one case, built as in training."""
+    g, T = load_mesh_cached(case_dir, excluded_patches, preproc_cache_dir,
+                            use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
     return g, T

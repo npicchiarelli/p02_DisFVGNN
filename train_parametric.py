@@ -258,11 +258,9 @@ val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
 # ── 5. Model & optimiser ────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-# FVGNN_REQUIRE_CUDA=1 (launcher.sh sets it) turns the silent CPU fallback into
-# an error: an unattended run on the CPU takes ~1.5 days instead of hours.
+# FVGNN_REQUIRE_CUDA=1 turns the silent CPU fallback into an error.
 if device.type != "cuda" and os.environ.get("FVGNN_REQUIRE_CUDA") == "1":
-    raise RuntimeError("FVGNN_REQUIRE_CUDA=1 but CUDA is not available "
-                       "(another user holding the MPS server?)")
+    raise RuntimeError("FVGNN_REQUIRE_CUDA=1 but CUDA is not available")
 # Feature dimensions are identical across meshes; take them from the first.
 in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + geometry
 in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10

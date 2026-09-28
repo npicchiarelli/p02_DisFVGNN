@@ -30,6 +30,7 @@ from torch_geometric.data import Data
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset
 from data_preparation.normalization import FeatureNormalizer
+from data_preparation.static_graph import load_graph_config, GRAPH_CONFIG
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate, widths_from_state_dict
@@ -82,6 +83,21 @@ if not os.path.exists(model_path):
     raise FileNotFoundError(
         f"No trained model at {model_path}. Run train_parametric.py first."
     )
+
+# Rebuild the graphs as this checkpoint's were built.
+graph_config = load_graph_config(checkpoint_dir)
+boundary_pos = graph_config["boundary_pos"]
+if ("cf" in exp_name.split("_")) != (boundary_pos == "cf"):
+    raise RuntimeError(
+        f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
+        f"on the boundary nodes (boundary_pos = {boundary_pos!r})."
+    )
+if graph_config.get("excluded_patches", excluded_patches) != excluded_patches:
+    raise RuntimeError(
+        f"Checkpoint was built with excluded_patches="
+        f"{graph_config['excluded_patches']}, this script uses {excluded_patches}."
+    )
+print(f"Boundary nodes: {boundary_pos}")
 
 os.makedirs(pred_dir, exist_ok=True)
 os.makedirs(error_dir, exist_ok=True)
@@ -154,8 +170,8 @@ preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
 
 def load_mesh(case_dir):
     """Return (static_graph, T_sequence) for one case, built as in training."""
-    g, T = load_mesh_cached(case_dir, excluded_patches, preproc_cache_dir,
-                            use_cache=use_cache)
+    g, T = load_mesh_cached(case_dir, excluded_patches, boundary_pos,
+                            preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
     return g, T

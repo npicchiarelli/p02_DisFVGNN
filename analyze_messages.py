@@ -108,7 +108,8 @@ def r2_multi(X, y):
 # ── 1. Mesh + fields, loaded once ───────────────────────────────────────────
 
 print(f"Loading {case_dir} ...")
-static_graph_full = build_static_graph(case_dir, excluded_patches)
+# Point-mean boundary nodes, as in train.py.
+static_graph_full = build_static_graph(case_dir, excluded_patches, boundary_pos="point_mean")
 T_sequence = load_fields(case_dir, "T", excluded_patches=excluded_patches)
 
 edge_index_raw = static_graph_full.edge_index

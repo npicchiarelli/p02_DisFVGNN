@@ -14,6 +14,7 @@ from data_preparation.mesh_dataset import SingleMeshDataset, temporal_split
 from data_preparation.normalization import FeatureNormalizer
 from data_preparation.static_graph import build_static_graph
 from export_results.saving_of import saving_of
+from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
 from soap import SOAP
@@ -50,6 +51,7 @@ for of_dir in ['system', 'constant']:
 
 checkpoint_dir = Path(processed_data_dir / pdata_casename / "checkpoints")
 os.makedirs(checkpoint_dir, exist_ok=True)
+save_git_commit(checkpoint_dir)
 
 # ── 1. Load your mesh data ──────────────────────────────────────────────────
 

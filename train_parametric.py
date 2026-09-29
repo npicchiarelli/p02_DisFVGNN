@@ -16,6 +16,7 @@ from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
 from data_preparation.static_graph import save_graph_config
 from export_results.saving_of import saving_of
+from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate
 from models.msg_regularization import MessageRegularizer
@@ -121,6 +122,7 @@ os.makedirs(error_dir, exist_ok=True)
 
 checkpoint_dir = run_dir / "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
+save_git_commit(checkpoint_dir)
 
 # Parsed meshes, shared with test_parametric.py (data_preparation/mesh_cache.py).
 # Clear the directory after changing the raw data.

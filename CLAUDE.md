@@ -15,3 +15,8 @@
 - Checkpoints trained before `git_commit.json` existed do not have it, and neither do
   checkpoints that are not stored locally. Never guess the hash from the current `HEAD` or the
   run's date: ask for it.
+
+## git
+
+- **Never** push anything to main without asking.
+- If you get asked to make a pull request and merge it remind the user that the CLI is not set up and PRs must be handled by the web interface.

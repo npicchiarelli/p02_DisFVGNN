@@ -36,6 +36,7 @@ excluded_patches = ["top", "bottom", "cbores"]
 epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
+use_pos_features = True  # False → drop the node positions (x, y, z), keep only the node type
 # Boundary-node position, "cf" or "point_mean" (legacy); see add_boundary_points.
 boundary_pos = os.environ.get("FVGNN_BOUNDARY_POS", "cf")
 if boundary_pos not in ("cf", "point_mean"):
@@ -45,7 +46,7 @@ layer_norm = False       # LayerNorm after encoders, messages and intermediate n
 # ReduceLROnPlateau. It starts stepping only once the message penalty is fully
 # ramped in (for every msg_penalty, so the controls share the schedule), and
 # watches val MSE * exp(alpha * pen / ref) — see MessageRegularizer.plateau_metric.
-lr_scheduler = False
+lr_scheduler = True
 
 # Message sparsity (models/msg_regularization.py). "none" trains as before and
 # only logs per-channel message statistics; "l1" / "hoyer" also fix the
@@ -74,12 +75,14 @@ if train_seed is not None:
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
 # _cf keeps Cf runs apart from the untagged point_mean ones.
+# _nopos is read back as a whole "_"-separated token, so its place does not matter.
 exp_name = (f"history{history}_msg_dim64"
             + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
             + ("" if lr_scheduler else "_nosched")
             + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
             + ("_cf" if boundary_pos == "cf" else "")
+            + ("" if use_pos_features else "_nopos")
             + ("" if use_fv_features else "_nofv"))
 
 # The split is over MESHES, not over time: each mesh contributes its full
@@ -198,9 +201,12 @@ for case_dir in case_dirs:
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
+    if not use_pos_features:
+        g.node_attr = g.node_attr[:, :2]  # node type only, drop the positions
     static_graphs.append(g)
     T_sequences.append(T)
-    print(f"  static graph edge_attr: {tuple(g.edge_attr.shape)}, T sequence: {tuple(T.shape)}")
+    print(f"  static graph node_attr: {tuple(g.node_attr.shape)}, "
+          f"edge_attr: {tuple(g.edge_attr.shape)}, T sequence: {tuple(T.shape)}")
 
 
 # ── 3. Fit a single normalizer on the TRAINING meshes only ──────────────────
@@ -249,7 +255,7 @@ print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}, "
 # pool alive across all epochs instead of re-forking it every epoch.
 num_workers = 4
 loader_kwargs = dict(
-    batch_size=8,
+    batch_size=2,
     num_workers=num_workers,
     pin_memory=torch.cuda.is_available(),
     persistent_workers=num_workers > 0,
@@ -264,7 +270,7 @@ print(f"Using device: {device}")
 if device.type != "cuda" and os.environ.get("FVGNN_REQUIRE_CUDA") == "1":
     raise RuntimeError("FVGNN_REQUIRE_CUDA=1 but CUDA is not available")
 # Feature dimensions are identical across meshes; take them from the first.
-in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + geometry
+in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + node type (+ position)
 in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
 
 if train_seed is not None:

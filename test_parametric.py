@@ -54,6 +54,8 @@ history = int(os.environ.get("FVGNN_HISTORY", "1"))
 # train_parametric.py appends _nofv when it drops the FV edge features, so the
 # checkpoint name alone tells us which edge-feature set the weights expect.
 use_fv_features = not exp_name.endswith("_nofv")
+# Likewise _nopos when it drops the node positions and keeps only the node type.
+use_pos_features = "nopos" not in exp_name.split("_")
 
 train_mesh_frac = 0.6
 val_mesh_frac   = 0.2
@@ -161,7 +163,7 @@ print(f"  val   meshes ({len(val_mesh_idx)}): {names_of(val_mesh_idx)}")
 print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")
 
 
-# ── 2. Mesh loader (matches train_parametric.py, incl. edge_attr slicing) ───
+# ── 2. Mesh loader (matches train_parametric.py, incl. feature slicing) ─────
 
 # Shared with train_parametric.py (data_preparation/mesh_cache.py).
 use_cache = True
@@ -174,6 +176,8 @@ def load_mesh(case_dir):
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
+    if not use_pos_features:
+        g.node_attr = g.node_attr[:, :2]
     return g, T
 
 
@@ -238,7 +242,7 @@ print(f"Using device: {device}")
 
 # Feature dims are identical across meshes; take them from any test mesh.
 any_graph = next(iter(test_graphs.values()))
-in_node_feat = history + any_graph.node_attr.shape[1]   # T history + geometry
+in_node_feat = history + any_graph.node_attr.shape[1]   # T history + node type, + 3 positions unless _nopos
 in_edge_feat = any_graph.edge_attr.shape[1]             # 10, or 4 under _nofv
 state = torch.load(model_path, map_location=device)
 model = FVSurrogate(

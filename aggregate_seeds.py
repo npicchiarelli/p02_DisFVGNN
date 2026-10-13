@@ -7,6 +7,12 @@ saved along a leading seed axis and writes it next to them:
 
     processed_data/parametric_<exp_name>/seeds.npz
 
+A rerun never overwrites: when seed_<n> is taken, train_parametric.py writes to
+seed_<n>_01, then seed_<n>_02, ... Each rerun index is a separate set of seeds,
+collected into its own file, seeds_01.npz, seeds_02.npz, ..., so two sweeps of
+one experiment are never mixed. The index is the one test_parametric.py takes
+as FVGNN_RUN; 0 is the un-numbered seed_<n> runs and seeds.npz.
+
 Data only: no statistics and no plots, those are data_analysis.ipynb's job.
 
 Keys, for S seeds, E epochs, C message channels and T_m rollout steps on test
@@ -33,7 +39,8 @@ is reported and its seeds.npz left as it was. An unseeded run at the top of
 an experiment directory is not a seed and is ignored.
 
     python aggregate_seeds.py                # every experiment with seed_<n> runs
-    python aggregate_seeds.py <exp_name> ... # only these
+    python aggregate_seeds.py <exp_name> ... # only these, every rerun index
+    python aggregate_seeds.py <exp_name>:<i> # only rerun i of it (0: seeds.npz)
 """
 
 import json
@@ -58,10 +65,17 @@ class Inconsistent(Exception):
 
 
 def seed_dirs(exp_dir):
-    """seed_<n> subdirectories of exp_dir, by ascending n."""
-    found = [(int(m.group(1)), d) for d in exp_dir.iterdir()
-             if d.is_dir() and (m := re.fullmatch(r"seed_(\d+)", d.name))]
-    return sorted(found)
+    """seed_<n>[_<i>] subdirectories of exp_dir grouped by rerun index i (0
+    when un-numbered): {i: [(n, dir), ...]}, by ascending i and n."""
+    groups = {}
+    for d in exp_dir.iterdir():
+        if d.is_dir() and (m := re.fullmatch(r"seed_(\d+)(?:_(\d+))?", d.name)):
+            groups.setdefault(int(m.group(2) or 0), []).append((int(m.group(1)), d))
+    return {i: sorted(g) for i, g in sorted(groups.items())}
+
+
+def npz_name(rerun):
+    return "seeds.npz" if rerun == 0 else f"seeds_{rerun:02d}.npz"
 
 
 def load_seed(seed, run_dir):
@@ -127,41 +141,55 @@ def stack(rows):
     return out
 
 
-def aggregate(exp_dir):
-    """Write exp_dir/seeds.npz. Returns False if its seeds are inconsistent."""
-    rows, unfinished = [], []
-    for seed, d in seed_dirs(exp_dir):
-        row = load_seed(seed, d)
-        if row is None:
-            unfinished.append(d.name)
-        else:
-            rows.append(row)
-    note = f" (unfinished, left out: {', '.join(unfinished)})" if unfinished else ""
-    if not rows:
-        print(f"{exp_dir.name}: no finished seed yet{note}")
-        return True
-    try:
-        out = stack(rows)
-    except Inconsistent as e:
-        print(f"{exp_dir.name}: NOT aggregated, seeds.npz left as it was: {e}")
-        return False
-    out["exp_name"] = np.array(exp_dir.name.removeprefix(f"{case_name}_"))
-    np.savez(exp_dir / "seeds.npz", **out)
-    print(f"{exp_dir.name}: seeds {out['seeds'].tolist()} -> seeds.npz{note}")
-    return True
+def aggregate(exp_dir, reruns=None):
+    """Write exp_dir/seeds.npz, seeds_01.npz, ..., one per rerun index, or only
+    those in reruns. Returns False if the seeds of any are inconsistent."""
+    groups = seed_dirs(exp_dir)
+    ok = True
+    for rerun in (sorted(groups) if reruns is None else reruns):
+        name = npz_name(rerun)
+        rows, unfinished = [], []
+        for seed, d in groups.get(rerun, []):
+            row = load_seed(seed, d)
+            if row is None:
+                unfinished.append(d.name)
+            else:
+                rows.append(row)
+        note = f" (unfinished, left out: {', '.join(unfinished)})" if unfinished else ""
+        if not rows:
+            print(f"{exp_dir.name}: no finished seed for {name} yet{note}")
+            continue
+        try:
+            out = stack(rows)
+        except Inconsistent as e:
+            print(f"{exp_dir.name}: NOT aggregated, {name} left as it was: {e}")
+            ok = False
+            continue
+        out["exp_name"] = np.array(exp_dir.name.removeprefix(f"{case_name}_"))
+        np.savez(exp_dir / name, **out)
+        print(f"{exp_dir.name}: seeds {out['seeds'].tolist()} -> {name}{note}")
+    return ok
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        exp_dirs = [processed_data_dir / f"{case_name}_{name.removeprefix(case_name + '_')}"
-                    for name in sys.argv[1:]]
-        missing = [str(d) for d in exp_dirs if not d.is_dir()]
+        # <exp_name>[:<i>]; the same experiment may come with several indices
+        targets = {}
+        for arg in sys.argv[1:]:
+            name, _, rerun = arg.partition(":")
+            d = processed_data_dir / f"{case_name}_{name.removeprefix(case_name + '_')}"
+            if not rerun:
+                targets[d] = None
+            elif targets.get(d, []) is not None:
+                targets.setdefault(d, []).append(int(rerun))
+        missing = [str(d) for d in targets if not d.is_dir()]
         if missing:
             sys.exit(f"No such experiment directory: {', '.join(missing)}")
+        targets = {d: r and sorted(set(r)) for d, r in targets.items()}
     else:
-        exp_dirs = sorted(d for d in processed_data_dir.glob(f"{case_name}_*")
-                          if d.is_dir() and seed_dirs(d))
-        if not exp_dirs:
+        targets = {d: None for d in sorted(processed_data_dir.glob(f"{case_name}_*"))
+                   if d.is_dir() and seed_dirs(d)}
+        if not targets:
             sys.exit(f"No experiment in {processed_data_dir} has seed_<n> runs yet.")
-    ok = [aggregate(d) for d in exp_dirs]
+    ok = [aggregate(d, r) for d, r in targets.items()]
     sys.exit(0 if all(ok) else 1)

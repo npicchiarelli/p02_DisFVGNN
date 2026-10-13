@@ -36,7 +36,12 @@ excluded_patches = ["top", "bottom", "cbores"]
 epochs = 200
 history = 1              # number of past timesteps used to predict the next
 use_fv_features = True   # False → keep only the first 4 (geometry) edge features
-use_pos_features = True  # False → drop the node positions (x, y, z), keep only the node type
+# Node positions (x, y, z) next to the node type: FVGNN_POS_FEATURES=1 keeps
+# them, 0 drops them and keeps only the type (the _nopos runs).
+pos_features_env = os.environ.get("FVGNN_POS_FEATURES", "0")
+if pos_features_env not in ("0", "1"):
+    raise ValueError(f"FVGNN_POS_FEATURES must be '0' or '1', got {pos_features_env!r}")
+use_pos_features = pos_features_env == "1"
 # Boundary-node position, "cf" or "point_mean" (legacy); see add_boundary_points.
 boundary_pos = os.environ.get("FVGNN_BOUNDARY_POS", "cf")
 if boundary_pos not in ("cf", "point_mean"):
@@ -46,7 +51,12 @@ layer_norm = False       # LayerNorm after encoders, messages and intermediate n
 # ReduceLROnPlateau. It starts stepping only once the message penalty is fully
 # ramped in (for every msg_penalty, so the controls share the schedule), and
 # watches val MSE * exp(alpha * pen / ref) — see MessageRegularizer.plateau_metric.
-lr_scheduler = True
+# FVGNN_LR_SCHEDULER=1 turns it on, 0 holds the LR at its initial value (the
+# _nosched runs).
+lr_scheduler_env = os.environ.get("FVGNN_LR_SCHEDULER", "1")
+if lr_scheduler_env not in ("0", "1"):
+    raise ValueError(f"FVGNN_LR_SCHEDULER must be '0' or '1', got {lr_scheduler_env!r}")
+lr_scheduler = lr_scheduler_env == "1"
 
 # Message sparsity (models/msg_regularization.py). "none" trains as before and
 # only logs per-channel message statistics; "l1" / "hoyer" also fix the
@@ -114,7 +124,22 @@ run_dir = processed_data_dir / pdata_casename
 if train_seed is not None:
     run_dir = run_dir / f"seed_{train_seed}"
 
-os.makedirs(run_dir, exist_ok=True)
+# Never overwrite an earlier run: if the directory is taken, write to the
+# first free <name>_01, <name>_02, ... next to it. Only the leaf is numbered,
+# so the seed_<n> runs of one configuration still share the experiment
+# directory. mkdir without exist_ok claims the name atomically, so two runs
+# launched together cannot both pick the same one. test_parametric.py
+# selects a numbered run with FVGNN_RUN=<i>.
+run_dir.parent.mkdir(parents=True, exist_ok=True)
+base_name = run_dir.name
+i = 0
+while True:
+    try:
+        run_dir.mkdir()
+        break
+    except FileExistsError:
+        i += 1
+        run_dir = run_dir.parent / f"{base_name}_{i:02d}"
 print(f"Seed: {train_seed}, writing to {run_dir}")
 
 pred_dir  = os.path.join(run_dir, "predictions")

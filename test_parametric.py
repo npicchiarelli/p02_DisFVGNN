@@ -47,8 +47,13 @@ case_name = "parametric"
 #   FVGNN_EXP=history1_mesh_nofv FVGNN_HISTORY=1 python test_parametric.py
 # FVGNN_SEED picks the seed_<n> run of an experiment trained with FVGNN_SEED;
 # unset → the unseeded run in the experiment directory itself.
+# FVGNN_RUN=<i> picks the i-th rerun, which train_parametric.py writes to
+# <dir>_<ii> instead of overwriting <dir>: seed_<n>_<ii> for a seeded run,
+# parametric_<exp>_<ii> for an unseeded one. Kept out of exp_name, which is
+# parsed below and must end in _nofv for a no-FV run.
 exp_name = os.environ.get("FVGNN_EXP", "history1_mesh_correct_edge_attr")
 train_seed = os.environ.get("FVGNN_SEED")
+run_index = os.environ.get("FVGNN_RUN")
 excluded_patches = ["top", "bottom", "cbores"]
 history = int(os.environ.get("FVGNN_HISTORY", "1"))
 # train_parametric.py appends _nofv when it drops the FV edge features, so the
@@ -73,6 +78,8 @@ pdata_casename = f"{case_name}_{exp_name}"
 run_dir = processed_data_dir / pdata_casename
 if train_seed is not None:
     run_dir = run_dir / f"seed_{int(train_seed)}"
+if run_index is not None and int(run_index) > 0:
+    run_dir = run_dir.parent / f"{run_dir.name}_{int(run_index):02d}"
 
 pred_dir  = os.path.join(run_dir, "predictions")
 error_dir = os.path.join(run_dir, "errors")

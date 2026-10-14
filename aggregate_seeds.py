@@ -22,6 +22,10 @@ mesh m:
     seeds                     (S,)     the seed of each row, ascending
     test_meshes               (M,)     names of the test meshes
     n_params                  (S,)     parameter count of each model.pt
+    n_epochs                  (S,)     epochs each seed trained
+    max_epochs                         epochs each seed was launched with, the
+                                       same for every seed; only for runs that
+                                       wrote early_stop.json
     train_losses, val_losses  (S, E)   per-epoch MSE (train: without penalty)
     lrs                       (S, E)   learning rate each epoch trained at
     msg_<key>                 (S, E) or (S, E, C), each per-epoch entry of
@@ -33,9 +37,16 @@ mesh m:
 
 A seed enters once its run has saved all of the above; unfinished ones are
 listed and left out, so every array shares the same seed axis. The seeds of
-one experiment must agree on everything that is not per seed (epochs, test
+one experiment must agree on everything that is not per seed (max_epochs, test
 meshes, parameter count, message-penalty settings), otherwise the experiment
-is reported and its seeds.npz left as it was. An unseeded run at the top of
+is reported and its seeds.npz left as it was.
+
+With early stopping (early_stop.json) the seeds train for different numbers
+of epochs: E is then the longest, and every per-epoch array is padded with
+NaN past each seed's n_epochs (an integer one, msg_epoch, becomes float to
+hold the NaN). Use the nan-aware reductions (np.nanmin, np.nanargmin, ...)
+over the epoch axis. Runs from before early_stop.json must train equally
+long, as before. An unseeded run at the top of
 an experiment directory is not a seed and is ignored.
 
     python aggregate_seeds.py                # every experiment with seed_<n> runs
@@ -102,12 +113,26 @@ def load_seed(seed, run_dir):
         "val_losses": np.load(ck / "val_losses.npy"),
         "lrs": np.load(ck / "lrs.npy"),
     }
+    row["n_epochs"] = len(row["train_losses"])
+    early_stop = ck / "early_stop.json"
+    if early_stop.exists():
+        row["max_epochs"] = json.loads(early_stop.read_text())["max_epochs"]
     with np.load(ck / "msg_reg_log.npz") as log:
         for k in log.files:
             row[f"msg_{k}"] = log[k]
     for m in test_meshes:
         row[f"rollout_mae_{m}"] = np.load(ck / f"rollout_mae_{m}.npy")
     return row
+
+
+def pad_epochs(a, n):
+    """a padded with NaN along its leading (epoch) axis to length n."""
+    a = np.asarray(a)
+    if len(a) == n:
+        return a
+    out = np.full((n,) + a.shape[1:], np.nan, dtype=np.result_type(a.dtype, np.float32))
+    out[:len(a)] = a
+    return out
 
 
 def stack(rows):
@@ -117,13 +142,20 @@ def stack(rows):
     per_seed = {f"msg_{k}" for k in MSG_PER_SEED}
     shared = {k for k in rows[0]
               if k.startswith("msg_") and k not in per_epoch | per_seed}
-    shared |= {"test_meshes", "n_params"}
+    shared |= {"test_meshes", "n_params", "max_epochs"}
+    per_epoch |= {"train_losses", "val_losses", "lrs"}
 
     keys = set(rows[0])
     for r in rows[1:]:
         if set(r) != keys:
             raise Inconsistent(f"seed {r['seeds']} saved {sorted(set(r) ^ keys)}"
                                f" differently from seed {rows[0]['seeds']}")
+    # Different lengths only from early stopping; the per-epoch arrays are
+    # then padded to the longest seed. Without early_stop.json they must agree.
+    n_max = max(r["n_epochs"] for r in rows)
+    if "max_epochs" in rows[0]:
+        rows = [{k: pad_epochs(v, n_max) if k in per_epoch else v for k, v in r.items()}
+                for r in rows]
     out = {}
     for k in rows[0]:
         vals = [r[k] for r in rows]

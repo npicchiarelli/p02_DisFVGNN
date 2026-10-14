@@ -57,6 +57,13 @@ lr_scheduler_env = os.environ.get("FVGNN_LR_SCHEDULER", "1")
 if lr_scheduler_env not in ("0", "1"):
     raise ValueError(f"FVGNN_LR_SCHEDULER must be '0' or '1', got {lr_scheduler_env!r}")
 lr_scheduler = lr_scheduler_env == "1"
+# Early stopping, only with the scheduler: stop once the LR has trained at
+# min_lr for stop_patience epochs without the plateau metric improving by the
+# scheduler's own threshold. min_lr = lr0 * 1e-4 (four cuts); without it the
+# LR stalls at 3e-9, where the next cut falls under the scheduler's eps. No
+# scheduled run so far reached its best val loss at 3e-7 or below.
+min_lr = 3e-7
+stop_patience = 10
 
 # Message sparsity (models/msg_regularization.py). "none" trains as before and
 # only logs per-channel message statistics; "l1" / "hoyer" also fix the
@@ -319,7 +326,7 @@ model = FVSurrogate(
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")
 
 optimizer = SOAP(model.parameters(), lr=3e-3)
-scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10)
+scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, min_lr=min_lr)
              if lr_scheduler else None)
 
 msg_reg = MessageRegularizer(model, kind=msg_penalty, alpha=msg_alpha,
@@ -329,6 +336,8 @@ msg_reg = MessageRegularizer(model, kind=msg_penalty, alpha=msg_alpha,
 train_losses = []   # MSE only, comparable with val and with unpenalised runs
 val_losses   = []
 lrs          = []   # LR each epoch trained at
+floor_bad    = 0    # epochs trained at min_lr without improvement
+stop_epoch   = None # last epoch trained, if stopped early
 
 pbar = tqdm(range(epochs), desc="Training")
 for epoch in pbar:
@@ -362,13 +371,29 @@ for epoch in pbar:
     val_losses.append(val_loss)
     lrs.append(optimizer.param_groups[0]["lr"])
     if scheduler is not None and msg_reg.ramp(epoch) == 1.0:
-        scheduler.step(msg_reg.plateau_metric(val_loss))
+        metric = msg_reg.plateau_metric(val_loss)
+        best_before = scheduler.best
+        scheduler.step(metric)
+        # step moves best only when the metric beats it by the scheduler's threshold
+        improved = scheduler.best != best_before
+        # lrs[-1], not the LR after the step: the epoch that brings the cut
+        # to min_lr still trained above it
+        at_floor = lrs[-1] <= min_lr * (1 + 1e-6)
+        floor_bad = floor_bad + 1 if at_floor and not improved else 0
     pbar.set_postfix({"train_loss": f"{train_loss:.4e}", "val_loss": f"{val_loss:.4e}",
                       "PR": f"{msg_stats['pr']:.1f}"})
+    if floor_bad >= stop_patience:
+        stop_epoch = epoch
+        print(f"\nEarly stop after epoch {epoch}: {stop_patience} epochs at LR "
+              f"{min_lr:.0e} without improvement")
+        break
 
 np.save(os.path.join(checkpoint_dir, "train_losses.npy"), train_losses)
 np.save(os.path.join(checkpoint_dir, "val_losses.npy"), val_losses)
 np.save(os.path.join(checkpoint_dir, "lrs.npy"), lrs)
+with open(checkpoint_dir / "early_stop.json", "w") as fh:
+    json.dump({"enabled": lr_scheduler, "min_lr": min_lr, "stop_patience": stop_patience,
+               "max_epochs": epochs, "stop_epoch": stop_epoch}, fh, indent=2)
 msg_reg.save(os.path.join(checkpoint_dir, "msg_reg_log.npz"))
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, "model.pt"))
 

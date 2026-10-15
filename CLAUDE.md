@@ -15,6 +15,10 @@
 - Checkpoints trained before `git_commit.json` existed do not have it, and neither do
   checkpoints that are not stored locally. Never guess the hash from the current `HEAD` or the
   run's date: ask for it.
+- Early-stopped runs (their checkpoints have `early_stop.json`) are NaN-padded past each
+  seed's `n_epochs` in `seeds.npz` (`aggregate_seeds.py`). For a seed's last value, never use
+  `a[:, -1]`: use the real last value `a[np.arange(S), z["n_epochs"] - 1]`, with `S` the
+  number of seeds.
 
 ## git
 

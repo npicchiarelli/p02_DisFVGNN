@@ -62,7 +62,7 @@ lr_scheduler = lr_scheduler_env == "1"
 # scheduler's own threshold. min_lr = lr0 * 1e-4 (four cuts); without it the
 # LR stalls at 3e-9, where the next cut falls under the scheduler's eps. No
 # scheduled run so far reached its best val loss at 3e-7 or below.
-min_lr = 3e-7
+min_lr = 3e-9
 stop_patience = 10
 
 # Message sparsity (models/msg_regularization.py). "none" trains as before and
@@ -76,6 +76,25 @@ msg_warmup  = 20         # epochs with the penalty off; l1 takes its reference o
 msg_ramp    = 10         # epochs of linear ramp up to the full alpha
 if msg_penalty not in MessageRegularizer.KINDS:
     raise ValueError(f"FVGNN_MSG_PENALTY must be one of {MessageRegularizer.KINDS}, got {msg_penalty!r}")
+
+# Input noise (Sanchez-Gonzalez et al. 2020): Gaussian noise on the T history
+# of every training sample, with the target left at the true T^{n+1}, so the
+# model learns to undo a perturbed input as a rollout feeds it one. In units of
+# the one-step increment: the std is input_noise * delta_scale in normalized T,
+# so FVGNN_NOISE=1 perturbs T^n by as much as a typical T^{n+1} - T^n.
+# Validation and test see clean inputs.
+input_noise = float(os.environ.get("FVGNN_NOISE", "0"))
+if input_noise < 0:
+    raise ValueError(f"FVGNN_NOISE must be >= 0, got {input_noise}")
+
+# Rollout validation: every val_rollout_every epochs, roll the model out for
+# val_rollout_steps steps from the start of each val mesh and log the MAE per
+# step. The one-step val loss cannot see whether a rollout stays bounded, so
+# the checkpoint with the lowest rollout MAE is kept as model_best_rollout.pt
+# next to the last-epoch model.pt. Logged only: the scheduler and early stopping
+# still follow the one-step val loss.
+val_rollout_every = 1
+val_rollout_steps = 40
 
 # FVGNN_SEED seeds the weight init and the training loader's shuffle order
 # (the mesh split has its own seed below), and writes the run to a seed_<n>
@@ -98,6 +117,7 @@ exp_name = (f"history{history}_msg_dim64"
             + ("_residual" if residual else "")
             + ("" if lr_scheduler else "_nosched")
             + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
+            + ("" if input_noise == 0 else f"_noise{input_noise:g}")
             + ("_cf" if boundary_pos == "cf" else "")
             + ("" if use_pos_features else "_nopos")
             + ("" if use_fv_features else "_nofv"))
@@ -309,7 +329,7 @@ if train_seed is not None:
     # Right before the model: the init, and through the train loader's sampler
     # every epoch's shuffle order, are drawn from the global RNG after this.
     torch.manual_seed(train_seed)
-model = FVSurrogate(
+model_kwargs = dict(
     in_node_feat=in_node_feat,
     in_edge_feat=in_edge_feat,
     msg_dim=64,
@@ -321,7 +341,8 @@ model = FVSurrogate(
     history=history,
     delta_scale=delta_scale,
     layer_norm=layer_norm,
-).to(device)
+)
+model = FVSurrogate(**model_kwargs).to(device)
 
 print(f"Model initialized with parameters: {sum(p.numel() for p in model.parameters()):4e}")
 
@@ -339,12 +360,32 @@ lrs          = []   # LR each epoch trained at
 floor_bad    = 0    # epochs trained at min_lr without improvement
 stop_epoch   = None # last epoch trained, if stopped early
 
+# Rollout validation (see val_rollout_every): per logged epoch, the MAE [K] of
+# each val mesh at each step, and the best mean MAE so far.
+val_rollout_ds     = [make_ds(i) for i in val_mesh_idx]
+val_rollout_epochs = []
+val_rollout_mae    = []   # (n_logged, n_val_meshes, val_rollout_steps)
+best_rollout       = {"epoch": None, "mae": float("inf")}
+
+# The noise is drawn on the GPU, from the CUDA generator: the CPU one, which
+# draws the initial weights and every epoch's shuffle order, then makes the
+# same draws as in a noise-free run, so seed n starts and shuffles exactly as
+# seed n of its noise-free control. (On the CPU fallback the two would share
+# a generator and that pairing would be lost.)
+noise_std = input_noise * delta_scale
+
 pbar = tqdm(range(epochs), desc="Training")
 for epoch in pbar:
     model.train()
     total_loss = 0.0
     for batch in train_loader:
         batch = batch.to(device)
+        if noise_std > 0:
+            # T history only, not the node type (or positions) after it. The
+            # residual model adds its increment to this noisy T^n, so matching
+            # the clean target means undoing the noise.
+            batch.x[:, :history] += noise_std * torch.randn(
+                batch.x.shape[0], history, device=batch.x.device)
         optimizer.zero_grad()
         pred = model(batch)                    # (batch_N,)
         mse = torch.nn.functional.mse_loss(pred, batch.y)
@@ -370,6 +411,21 @@ for epoch in pbar:
     val_loss /= len(val_loader)
     val_losses.append(val_loss)
     lrs.append(optimizer.param_groups[0]["lr"])
+
+    # Rollout validation, and the best-rollout checkpoint. A rollout that
+    # overflows gives nan, which never counts as best.
+    if epoch % val_rollout_every == 0 or epoch == epochs - 1:
+        maes = []
+        for ds in val_rollout_ds:
+            T_p, T_t = rollout(model, ds, device=device, n_steps=val_rollout_steps)
+            maes.append((T_p - T_t).abs().mean(1).numpy())
+        maes = np.stack(maes)
+        val_rollout_epochs.append(epoch)
+        val_rollout_mae.append(maes)
+        rollout_score = float(maes.mean())
+        if rollout_score < best_rollout["mae"]:
+            best_rollout = {"epoch": epoch, "mae": rollout_score}
+            torch.save(model.state_dict(), checkpoint_dir / "model_best_rollout.pt")
     if scheduler is not None and msg_reg.ramp(epoch) == 1.0:
         metric = msg_reg.plateau_metric(val_loss)
         best_before = scheduler.best
@@ -381,6 +437,7 @@ for epoch in pbar:
         at_floor = lrs[-1] <= min_lr * (1 + 1e-6)
         floor_bad = floor_bad + 1 if at_floor and not improved else 0
     pbar.set_postfix({"train_loss": f"{train_loss:.4e}", "val_loss": f"{val_loss:.4e}",
+                      "val_roll_MAE": f"{val_rollout_mae[-1].mean():.3g}",
                       "PR": f"{msg_stats['pr']:.1f}"})
     if floor_bad >= stop_patience:
         stop_epoch = epoch
@@ -396,11 +453,31 @@ with open(checkpoint_dir / "early_stop.json", "w") as fh:
                "max_epochs": epochs, "stop_epoch": stop_epoch}, fh, indent=2)
 msg_reg.save(os.path.join(checkpoint_dir, "msg_reg_log.npz"))
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, "model.pt"))
+np.save(checkpoint_dir / "val_rollout_mae.npy", np.stack(val_rollout_mae))
+np.save(checkpoint_dir / "val_rollout_epochs.npy", np.array(val_rollout_epochs))
+with open(checkpoint_dir / "val_rollout.json", "w") as fh:
+    json.dump({"every": val_rollout_every, "steps": val_rollout_steps,
+               "val_meshes": names_of(val_mesh_idx), "input_noise": input_noise,
+               "best_epoch": best_rollout["epoch"], "best_mae": best_rollout["mae"]},
+              fh, indent=2)
+print(f"best val rollout MAE {best_rollout['mae']:.4g} K at epoch {best_rollout['epoch']}"
+      f" ({val_rollout_steps} steps, mean over {len(val_rollout_ds)} val meshes)")
 
 # ── 7. Testing and rollout on the held-out (unseen) meshes ──────────────────
 
 model.eval()
 all_mae, all_mse = [], []
+
+# The best-rollout checkpoint is rolled out on the test meshes too
+# (rollout_mae_best_<mesh>.npy); everything else below is the last-epoch model.
+# None if every val rollout overflowed. A fresh model, not a copy: the copy
+# would carry the message hooks MessageRegularizer put on this one.
+best_model = None
+if best_rollout["epoch"] is not None:
+    best_model = FVSurrogate(**model_kwargs).to(device)
+    best_model.load_state_dict(torch.load(checkpoint_dir / "model_best_rollout.pt",
+                                          map_location=device))
+    best_model.eval()
 
 for mesh_i in test_mesh_idx:
     case_dir = case_dirs[mesh_i]
@@ -448,6 +525,10 @@ for mesh_i in test_mesh_idx:
 
     rollout_mae = torch.mean(torch.abs(T_pred_rollout - T_true_rollout), dim=1)
     np.save(os.path.join(checkpoint_dir, f"rollout_mae_{name}.npy"), rollout_mae.cpu().numpy())
+    if best_model is not None:
+        T_b, T_tb = rollout(best_model, test_ds, device=device)
+        np.save(checkpoint_dir / f"rollout_mae_best_{name}.npy",
+                (T_b - T_tb).abs().mean(1).numpy())
 
     mae = torch.mean(torch.abs(T_pred - T_true)).item()
     mse = torch.mean((T_pred - T_true) ** 2).item()

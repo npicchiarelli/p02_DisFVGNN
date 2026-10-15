@@ -35,6 +35,16 @@ mesh m:
                               one value, the same for every seed
     rollout_mae_<mesh>        (S, T_m) autoregressive rollout MAE per step
 
+Only for runs that wrote val_rollout.json (rollout validation, input noise):
+
+    input_noise                        FVGNN_NOISE, the same for every seed
+    val_meshes                (V,)     names of the val meshes rolled out
+    val_rollout_mae           (S, E, V, K)  MAE [K] per val mesh and step of a
+                                       K-step rollout at each epoch; NaN at an
+                                       epoch that was not rolled out
+    val_rollout_best_epoch    (S,)     epoch of model_best_rollout.pt, -1 if none
+    rollout_mae_best_<mesh>   (S, T_m) test rollout MAE of model_best_rollout.pt
+
 A seed enters once its run has saved all of the above; unfinished ones are
 listed and left out, so every array shares the same seed axis. The seeds of
 one experiment must agree on everything that is not per seed (max_epochs, test
@@ -122,6 +132,27 @@ def load_seed(seed, run_dir):
             row[f"msg_{k}"] = log[k]
     for m in test_meshes:
         row[f"rollout_mae_{m}"] = np.load(ck / f"rollout_mae_{m}.npy")
+
+    val_rollout = ck / "val_rollout.json"
+    if val_rollout.exists():
+        info = json.loads(val_rollout.read_text())
+        best = info["best_epoch"]
+        names = ["val_rollout_mae.npy", "val_rollout_epochs.npy"] + (
+            [] if best is None else [f"rollout_mae_best_{m}.npy" for m in test_meshes])
+        if not all((ck / n).exists() for n in names):
+            return None
+        row["input_noise"] = info["input_noise"]
+        row["val_meshes"] = np.array(info["val_meshes"])
+        # Spread onto the epoch axis, so it pads like every per-epoch array
+        mae = np.load(ck / "val_rollout_mae.npy")
+        per_epoch = np.full((row["n_epochs"],) + mae.shape[1:], np.nan)
+        per_epoch[np.load(ck / "val_rollout_epochs.npy")] = mae
+        row["val_rollout_mae"] = per_epoch
+        row["val_rollout_best_epoch"] = -1 if best is None else best
+        for m in test_meshes:
+            row[f"rollout_mae_best_{m}"] = (
+                np.full_like(row[f"rollout_mae_{m}"], np.nan) if best is None
+                else np.load(ck / f"rollout_mae_best_{m}.npy"))
     return row
 
 
@@ -142,8 +173,8 @@ def stack(rows):
     per_seed = {f"msg_{k}" for k in MSG_PER_SEED}
     shared = {k for k in rows[0]
               if k.startswith("msg_") and k not in per_epoch | per_seed}
-    shared |= {"test_meshes", "n_params", "max_epochs"}
-    per_epoch |= {"train_losses", "val_losses", "lrs"}
+    shared |= {"test_meshes", "n_params", "max_epochs", "input_noise", "val_meshes"}
+    per_epoch |= {"train_losses", "val_losses", "lrs", "val_rollout_mae"}
 
     keys = set(rows[0])
     for r in rows[1:]:

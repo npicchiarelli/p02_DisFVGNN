@@ -30,7 +30,7 @@ from torch_geometric.data import Data
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import load_graph_config, GRAPH_CONFIG
+from data_preparation.static_graph import load_graph_config, node_feature_columns, GRAPH_CONFIG
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate, widths_from_state_dict
@@ -100,6 +100,13 @@ if ("cf" in exp_name.split("_")) != (boundary_pos == "cf"):
     raise RuntimeError(
         f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
         f"on the boundary nodes (boundary_pos = {boundary_pos!r})."
+    )
+# Older checkpoints were trained without the cell-volume node feature.
+cell_volume = graph_config["cell_volume"]
+if ("vol" in exp_name.split("_")) != cell_volume:
+    raise RuntimeError(
+        f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
+        f"on the cell-volume node feature (cell_volume = {cell_volume})."
     )
 if graph_config.get("excluded_patches", excluded_patches) != excluded_patches:
     raise RuntimeError(
@@ -183,8 +190,7 @@ def load_mesh(case_dir):
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
-    if not use_pos_features:
-        g.node_attr = g.node_attr[:, :2]
+    g.node_attr = g.node_attr[:, node_feature_columns(cell_volume, use_pos_features)]
     return g, T
 
 
@@ -249,7 +255,7 @@ print(f"Using device: {device}")
 
 # Feature dims are identical across meshes; take them from any test mesh.
 any_graph = next(iter(test_graphs.values()))
-in_node_feat = history + any_graph.node_attr.shape[1]   # T history + node type, + 3 positions unless _nopos
+in_node_feat = history + any_graph.node_attr.shape[1]   # T history + node type, + cell volume under _vol, + 3 positions unless _nopos
 in_edge_feat = any_graph.edge_attr.shape[1]             # 10, or 4 under _nofv
 state = torch.load(model_path, map_location=device)
 model = FVSurrogate(

@@ -127,6 +127,15 @@ def load_non_orthogonality(directory: str) -> torch.Tensor:
 
     return non_orthogonality
 
+def load_cell_volumes(directory: str) -> torch.Tensor:
+
+    of_binder = getter_of([".", "-case", f"{directory}"])
+
+    V = of_binder.getV()
+    V = torch.from_numpy(V.reshape(-1, 1))
+
+    return V
+
 def load_face_owners(directory: str) -> np.ndarray:
     """Owner cell of every face, indexed by global face index.
 

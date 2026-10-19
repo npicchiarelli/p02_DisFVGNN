@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from torch_geometric.data import Data
 
-from mesh2graph.utils import parse_vertex_centered, add_boundary_points, load_face_surfaces_by_patch, load_face_owners, load_skewness, load_non_orthogonality
+from mesh2graph.utils import parse_vertex_centered, add_boundary_points, load_face_surfaces_by_patch, load_face_owners, load_skewness, load_non_orthogonality, load_cell_volumes
 from smithers.io.openfoam import FoamMesh
 from smithers.io.openfoam import field_parser
 
@@ -14,19 +14,28 @@ from smithers.io.openfoam import field_parser
 GRAPH_CONFIG = "graph_config.json"
 
 
-def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches):
+def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume):
     with open(os.path.join(checkpoint_dir, GRAPH_CONFIG), "w") as fh:
         json.dump({"boundary_pos": boundary_pos,
-                   "excluded_patches": list(excluded_patches)}, fh, indent=2)
+                   "excluded_patches": list(excluded_patches),
+                   "cell_volume": cell_volume}, fh, indent=2)
 
 
 def load_graph_config(checkpoint_dir) -> dict:
     # No file: a checkpoint older than graph_config.json, hence point_mean.
+    # No cell_volume key: a checkpoint older than the cell-volume node feature.
     path = os.path.join(checkpoint_dir, GRAPH_CONFIG)
     if not os.path.exists(path):
-        return {"boundary_pos": "point_mean"}
+        return {"boundary_pos": "point_mean", "cell_volume": False}
     with open(path) as fh:
-        return json.load(fh)
+        return {"cell_volume": False, **json.load(fh)}
+
+
+def node_feature_columns(cell_volume: bool, positions: bool) -> list:
+    # node_attr is [node type (2), log cell volume (1), x, y, z (3)]; the columns a
+    # model takes. The cell volume is an FV feature, dropped with the FV edge
+    # features; checkpoints older than it take cell_volume=False.
+    return [0, 1] + ([2] if cell_volume else []) + ([3, 4, 5] if positions else [])
 
 
 def build_static_graph(case_dir,
@@ -56,8 +65,18 @@ def build_static_graph(case_dir,
     bnd_type[:, 1] = 1.0 # One hot encoding for boundary nodes
     node_type = torch.cat((node_type, bnd_type), dim = 0) # add them to the node_type encoding
 
-    # Adding node type and position to the x attribute of static_graph
-    static_graph.node_attr = torch.cat((node_type, static_graph.pos), dim = 1).float()
+    # Cell volume: internal nodes are the cells in OpenFOAM cell order. Log, as the
+    # snappyHexMesh refinement levels are 8x apart (~3500x overall on the parametric
+    # meshes), which a z-score alone would squash. Boundary nodes are face centres
+    # and have no volume: node_type tells them apart, so they take the mean internal
+    # log volume, which keeps them out of the way of the normalizer's statistics
+    # (a 0 in log space would sit ~20 away and dominate the std).
+    log_vol = torch.log(load_cell_volumes(case_dir))
+    cell_vol = torch.cat((log_vol, log_vol.mean().expand(N_bnd, 1)), dim = 0)
+
+    # Adding node type, log cell volume and position to the x attribute of static_graph.
+    # The column order is relied on by node_feature_columns.
+    static_graph.node_attr = torch.cat((node_type, cell_vol.float(), static_graph.pos.float()), dim = 1).float()
 
     #-------------------------------------EDGES---------------------------------------------
 

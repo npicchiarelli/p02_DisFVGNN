@@ -103,6 +103,7 @@ def rollout(
     model,
     test_ds: SingleMeshDataset,
     device: torch.device = torch.device('cpu'),
+    n_steps: int = None,            # None: the whole sequence
 ) -> tuple:
     """
     Autoregressive rollout over the test set.
@@ -110,8 +111,8 @@ def rollout(
     every subsequent step uses the model's own predictions.
 
     Returns:
-        T_pred : (n_test, N) predictions in physical units
-        T_true : (n_test, N) ground truth in physical units
+        T_pred : (n_steps, N) predictions in physical units
+        T_true : (n_steps, N) ground truth in physical units
     """
     model.eval()
     model.to(device)
@@ -119,7 +120,7 @@ def rollout(
     norm       = test_ds.norm
     history    = test_ds.history
     T_sequence = test_ds.T
-    n_steps    = len(test_ds)
+    n_steps    = len(test_ds) if n_steps is None else min(n_steps, len(test_ds))
 
     edge_attr_norm = test_ds._norm_edge_attr.to(device)
     node_attr_norm = test_ds._norm_node_attr.to(device)

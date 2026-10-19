@@ -11,13 +11,24 @@ from .field import load_fields
 from .static_graph import build_static_graph
 
 
-def code_key() -> str:
-    """Short hash of the code that builds graphs and fields, and of this module.
-    Editing any of it invalidates the cache. Files are located through the
-    imported modules, so a copied script still finds them."""
+def _hash_code() -> str:
     files = [mesh2graph.utils.__file__, sys.modules["getter_of"].__file__,
              static_graph.__file__, field.__file__, __file__]
     return hashlib.sha1(b"".join(Path(f).read_bytes() for f in files)).hexdigest()[:8]
+
+
+# Hashed once, right after the modules above were imported, so the key describes
+# the code this process runs. Hashing at call time would read the files as they
+# are now: a long-lived process (a Jupyter kernel) imported before an edit would
+# then save graphs built by the old code under the new key.
+_CODE_KEY = _hash_code()
+
+
+def code_key() -> str:
+    """Short hash of the code that builds graphs and fields, and of this module,
+    as imported. Editing any of it invalidates the cache. Files are located
+    through the imported modules, so a copied script still finds them."""
+    return _CODE_KEY
 
 
 def load_mesh_cached(case_dir, excluded_patches, boundary_pos, cache_dir, use_cache=True):

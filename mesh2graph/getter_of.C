@@ -163,6 +163,14 @@ autoPtr<Foam::Time> _runTime;
 
         return Foam2Eigen::field2Eigen(nonOrtho);
     }
+
+    // Getter for cell volumes, one per cell in cell index order
+
+    Eigen::VectorXd getV()
+    {
+        const scalarField& V = _mesh().cellVolumes();
+        return Foam2Eigen::field2Eigen(V);
+    }
 };
 
 
@@ -184,5 +192,6 @@ PYBIND11_MODULE(getter_of, m)
             .def("getSf", &getter_of::getSf, py::return_value_policy::reference_internal)
             .def("getSfByPatch", &getter_of::getSfByPatch, py::return_value_policy::reference_internal)
             .def("getSkewness", &getter_of::getSkewness, py::return_value_policy::reference_internal)
-            .def("getNonOrthogonality", &getter_of::getNonOrthogonality, py::return_value_policy::reference_internal);
+            .def("getNonOrthogonality", &getter_of::getNonOrthogonality, py::return_value_policy::reference_internal)
+            .def("getV", &getter_of::getV);
 }

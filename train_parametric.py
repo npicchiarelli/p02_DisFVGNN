@@ -14,7 +14,7 @@ from tqdm import tqdm
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import save_graph_config
+from data_preparation.static_graph import save_graph_config, node_feature_columns
 from export_results.saving_of import saving_of
 from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories
@@ -33,9 +33,9 @@ case_name = "parametric"
 # analogue of the flange's excluded patch1/patch3 — and fixedValue on
 # (sides, holes), which become the boundary nodes of the graph.
 excluded_patches = ["top", "bottom", "cbores"]
-epochs = 200
+epochs = 500
 history = 1              # number of past timesteps used to predict the next
-use_fv_features = True   # False → keep only the first 4 (geometry) edge features
+use_fv_features = True   # False → keep only the first 4 (geometry) edge features, and drop the cell volume
 # Node positions (x, y, z) next to the node type: FVGNN_POS_FEATURES=1 keeps
 # them, 0 drops them and keeps only the type (the _nopos runs).
 pos_features_env = os.environ.get("FVGNN_POS_FEATURES", "0")
@@ -111,6 +111,8 @@ if train_seed is not None:
 # edge-feature setup with exp_name.endswith("_nofv"), so any tag appended
 # after it would silently be read back as an FV run.
 # _cf keeps Cf runs apart from the untagged point_mean ones.
+# _vol keeps runs with the cell-volume node feature (every FV run since it was
+# added) apart from the older, untagged FV runs without it.
 # _nopos is read back as a whole "_"-separated token, so its place does not matter.
 exp_name = (f"history{history}_msg_dim64"
             + ("_layernorm" if layer_norm else "")
@@ -119,6 +121,7 @@ exp_name = (f"history{history}_msg_dim64"
             + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
             + ("" if input_noise == 0 else f"_noise{input_noise:g}")
             + ("_cf" if boundary_pos == "cf" else "")
+            + ("_vol" if use_fv_features else "")
             + ("" if use_pos_features else "_nopos")
             + ("" if use_fv_features else "_nofv"))
 
@@ -239,7 +242,7 @@ split_path = checkpoint_dir / "mesh_split.json"
 with open(split_path, "w") as fh:
     json.dump(split_record, fh, indent=2)
 print(f"  split saved to {split_path}")
-save_graph_config(checkpoint_dir, boundary_pos, excluded_patches)
+save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume=use_fv_features)
 
 
 # ── 2. Load every mesh's data ───────────────────────────────────────────────
@@ -253,8 +256,8 @@ for case_dir in case_dirs:
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
-    if not use_pos_features:
-        g.node_attr = g.node_attr[:, :2]  # node type only, drop the positions
+    # node type, + cell volume unless no-FV, + positions unless _nopos
+    g.node_attr = g.node_attr[:, node_feature_columns(use_fv_features, use_pos_features)]
     static_graphs.append(g)
     T_sequences.append(T)
     print(f"  static graph node_attr: {tuple(g.node_attr.shape)}, "

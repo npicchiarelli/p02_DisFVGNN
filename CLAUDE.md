@@ -19,6 +19,15 @@
   seed's `n_epochs` in `seeds.npz` (`aggregate_seeds.py`). For a seed's last value, never use
   `a[:, -1]`: use the real last value `a[np.arange(S), z["n_epochs"] - 1]`, with `S` the
   number of seeds.
+- When plotting rollout errors, always use the relative mean absolute (square) error as
+$$
+\mathrm{RMAE}\left(\hat{\mathbf{u}}^{\mathrm{pred}}, \mathbf{u}^{\mathrm{true}}\right) = \frac{\sum_i \left| \hat{u}_i^{\mathrm{pred}} - u_i^{\mathrm{true}} \right|}{\sum_i \left| u_i^{\mathrm{true}} \right|}
+$$
+
+$$
+\mathrm{RMSE}\left(\hat{\mathbf{u}}^{\mathrm{pred}}, \mathbf{u}^{\mathrm{true}}\right) = \frac{\sum_i \left( \hat{u}_i^{\mathrm{pred}} - u_i^{\mathrm{true}} \right)^2}{\sum_i \left( u_i^{\mathrm{true}} \right)^2}
+$$.
+Change already done plots accordingly as needed.
 
 ## git
 

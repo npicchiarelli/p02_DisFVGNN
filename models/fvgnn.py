@@ -4,12 +4,15 @@ from torch_geometric.nn import MessagePassing
 
 
 def widths_from_state_dict(state) -> dict:
-    """hidden_dim, msg_dim and mlp_hidden of the FVSurrogate a state_dict was
-    saved from, as keyword arguments for its constructor."""
+    """hidden_dim, msg_dim, mlp_hidden, n_mp_layers and skip of the FVSurrogate
+    a state_dict was saved from, as keyword arguments for its constructor."""
     return dict(
         hidden_dim=state["node_encoder.weight"].shape[0],
         msg_dim=state["mp_layers.0.msg_fnc.6.weight"].shape[0],
         mlp_hidden=state["mp_layers.0.msg_fnc.0.weight"].shape[0],
+        n_mp_layers=1 + max(int(k.split(".")[1]) for k in state if k.startswith("mp_layers.")),
+        # the skip connections have no weights: their buffer marks the checkpoint
+        skip="latent_skip" in state,
     )
 
 
@@ -117,6 +120,10 @@ class FVSurrogate(nn.Module):
     and every intermediate node MLP, as in MeshGraphNets. The last node MLP is
     left plain: it decodes T, and a LayerNorm over one feature is a constant.
 
+    With skip=True every intermediate MP layer adds its output to its input,
+    x <- x + layer(x), as in MeshGraphNets. The last layer maps to out_dim and
+    has none. Nothing changes with n_mp_layers=1.
+
     mlp_hidden is the width of the message and node MLPs, hidden_dim by
     default. It exists for the checkpoints trained before hidden_dim reached
     the MLPs: those were built with hidden_dim=64 but got the 128-wide MLPs of
@@ -138,6 +145,7 @@ class FVSurrogate(nn.Module):
         history: int = 1,          # T^n is column history-1 of data.x (residual only)
         delta_scale: float = 1.0,  # rms(T^{n+1} - T^n) / T_std (residual only)
         layer_norm: bool = False,
+        skip: bool = False,        # x <- x + layer(x) on the intermediate MP layers
     ):
         super().__init__()
 
@@ -153,6 +161,12 @@ class FVSurrogate(nn.Module):
             # reverse) fails on the missing/unexpected key instead of silently.
             # Loaders need not know the value — load_state_dict restores it.
             self.register_buffer("delta_scale", torch.tensor(float(delta_scale)))
+        self.skip = skip
+        if skip:
+            # The skip connections have no weights, so nothing else in the
+            # state_dict would tell a loader they were there: this buffer does,
+            # as delta_scale does for residual (widths_from_state_dict).
+            self.register_buffer("latent_skip", torch.tensor(True))
 
         # Lift raw features to hidden_dim once
         self.node_encoder = nn.Linear(in_node_feat, hidden_dim)
@@ -194,8 +208,10 @@ class FVSurrogate(nn.Module):
         x         = self.node_encoder_norm(self.node_encoder(data.x))          # (N, hidden_dim)
         edge_attr = self.edge_encoder_norm(self.edge_encoder(data.edge_attr))  # (E, hidden_dim)
 
-        for layer in self.mp_layers:
-            x = layer(x, data.edge_index, edge_attr)    # (N, hidden_dim) → ... → (N, out_dim)
+        last = len(self.mp_layers) - 1
+        for k, layer in enumerate(self.mp_layers):
+            out = layer(x, data.edge_index, edge_attr)  # (N, hidden_dim) → ... → (N, out_dim)
+            x = x + out if self.skip and k < last else out
 
         out = x.squeeze(-1)                             # (N,) for scalar T
         if self.residual:

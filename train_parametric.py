@@ -48,6 +48,18 @@ if boundary_pos not in ("cf", "point_mean"):
     raise ValueError(f"FVGNN_BOUNDARY_POS must be 'cf' or 'point_mean', got {boundary_pos!r}")
 residual = True          # predict T^{n+1} = T^n + delta_scale * f(.) instead of T^{n+1}
 layer_norm = False       # LayerNorm after encoders, messages and intermediate node updates
+# Message-passing depth (FVGNN_MP_LAYERS) and the skip connections on the
+# intermediate layers, x <- x + layer(x) (FVGNN_SKIP=1). The skip changes
+# nothing with one layer.
+n_mp_layers = int(os.environ.get("FVGNN_MP_LAYERS", "2"))
+if n_mp_layers < 1:
+    raise ValueError(f"FVGNN_MP_LAYERS must be >= 1, got {n_mp_layers}")
+skip_env = os.environ.get("FVGNN_SKIP", "0")
+if skip_env not in ("0", "1"):
+    raise ValueError(f"FVGNN_SKIP must be '0' or '1', got {skip_env!r}")
+skip = skip_env == "1"
+if skip and n_mp_layers == 1:
+    raise ValueError("FVGNN_SKIP=1 needs FVGNN_MP_LAYERS >= 2: one layer has no intermediate layer")
 # ReduceLROnPlateau. It starts stepping only once the message penalty is fully
 # ramped in (for every msg_penalty, so the controls share the schedule), and
 # watches val MSE * exp(alpha * pen / ref) — see MessageRegularizer.plateau_metric.
@@ -114,7 +126,11 @@ if train_seed is not None:
 # _vol keeps runs with the cell-volume node feature (every FV run since it was
 # added) apart from the older, untagged FV runs without it.
 # _nopos is read back as a whole "_"-separated token, so its place does not matter.
+# _mpl<n> for n_mp_layers > 1 (one-layer runs keep their untagged names), _skip
+# for the skip connections, which leave no weights to tell them apart.
 exp_name = (f"history{history}_msg_dim64"
+            + ("" if n_mp_layers == 1 else f"_mpl{n_mp_layers}")
+            + ("_skip" if skip else "")
             + ("_layernorm" if layer_norm else "")
             + ("_residual" if residual else "")
             + ("" if lr_scheduler else "_nosched")
@@ -339,11 +355,12 @@ model_kwargs = dict(
     hidden_dim=64,
     mlp_hidden=128,
     out_dim=1,
-    n_mp_layers=1,         # message passing depth
+    n_mp_layers=n_mp_layers,  # message passing depth
     residual=residual,
     history=history,
     delta_scale=delta_scale,
     layer_norm=layer_norm,
+    skip=skip,
 )
 model = FVSurrogate(**model_kwargs).to(device)
 

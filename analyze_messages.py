@@ -163,7 +163,6 @@ for exp_name in exp_names:
         in_edge_feat=static_graph.edge_attr.shape[1],
         **widths_from_state_dict(state),
         out_dim=1,
-        n_mp_layers=1,
     ).to(device)
     model.load_state_dict(state)
     model.eval()

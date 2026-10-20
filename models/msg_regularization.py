@@ -87,8 +87,9 @@ class MessageRegularizer:
                  msg_fnc[-1].weight on the epoch's first penalised batch
 
     Args:
-        model  : FVSurrogate with n_mp_layers=1 (and, with a penalty, no
-                 message LayerNorm)
+        model  : FVSurrogate; with a penalty, n_mp_layers=1 and no message
+                 LayerNorm. With kind "none" and several layers, the statistics
+                 are those of the last layer's message
         kind   : "none" | "l1" | "hoyer"
         alpha  : fractional MSE increase accepted per unit of penalty removed
         warmup : epochs with the penalty off
@@ -109,11 +110,13 @@ class MessageRegularizer:
             raise ValueError(f"kind must be one of {self.KINDS}, got {kind!r}")
         if kind == "none" and alpha != 0.0:
             raise ValueError(f"kind 'none' has no penalty to weight, got alpha={alpha}")
-        if len(model.mp_layers) != 1:
+        if len(model.mp_layers) != 1 and kind != "none":
             raise ValueError(
-                f"written for n_mp_layers=1, got {len(model.mp_layers)}: the "
-                "penalty and the scale fix act on a single message")
-        layer = model.mp_layers[0]
+                f"the penalty and the scale fix act on a single message: kind "
+                f"{kind!r} needs n_mp_layers=1, got {len(model.mp_layers)}")
+        # The last layer's message is the one aggregated into the node update
+        # that outputs T, the analogue of the FV flux; with one layer, the same.
+        layer = model.mp_layers[-1]
         if kind != "none" and not isinstance(layer.msg_norm, nn.Identity):
             raise ValueError(
                 "the scale fix needs msg_fnc[-1] to produce the message, but a "

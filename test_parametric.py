@@ -263,7 +263,6 @@ model = FVSurrogate(
     in_edge_feat=in_edge_feat,
     **widths_from_state_dict(state),
     out_dim=1,
-    n_mp_layers=1,
     # Residual checkpoints carry their delta_scale buffer and absolute-T ones
     # do not, so the checkpoint itself says which model to rebuild. Likewise
     # only LayerNorm checkpoints hold node_encoder_norm weights.

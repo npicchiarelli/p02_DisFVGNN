@@ -14,7 +14,7 @@ from tqdm import tqdm
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import save_graph_config, node_feature_columns
+from data_preparation.static_graph import save_graph_config, node_feature_columns, CELL_VOLUME_TRANSFORMS
 from export_results.saving_of import saving_of
 from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories
@@ -29,13 +29,38 @@ torch.default_dtype = torch.float32
 # ── 0. Configuration ──────────────────────────────────────────────────
 
 case_name = "parametric"
+# Raw data, FVGNN_DATASET: a directory of ../raw_data, "parametric" (default, the
+# dt = 0.005 data since 2026-11-09) or e.g. "parametric_old" (dt = 0.025, what
+# every run before then saw). Not the default one: tagged in exp_name with the
+# name past "parametric_" (_old), with its own preprocessing cache. case_name
+# stays "parametric", the prefix of every run directory (aggregate_seeds.py).
+dataset = os.environ.get("FVGNN_DATASET", "parametric")
+if not os.path.isdir(os.path.join("../raw_data", dataset)) or not dataset.startswith("parametric"):
+    raise ValueError(f"FVGNN_DATASET must be a parametric* directory of ../raw_data, got {dataset!r}")
+dataset_tag = "" if dataset == "parametric" else dataset.removeprefix("parametric").lstrip("_")
 # The parametric meshes use zeroGradient on (top, bottom, cbores) — the
 # analogue of the flange's excluded patch1/patch3 — and fixedValue on
 # (sides, holes), which become the boundary nodes of the graph.
 excluded_patches = ["top", "bottom", "cbores"]
 epochs = 500
 history = 1              # number of past timesteps used to predict the next
-use_fv_features = True   # False → keep only the first 4 (geometry) edge features, and drop the cell volume
+# FV features: the face-area vector, its magnitude, skewness and
+# non-orthogonality on the edges, and the log cell volume on the nodes.
+# FVGNN_FV_FEATURES=1 keeps them, 0 keeps only the first 4 (geometry) edge
+# features and drops the cell volume (the _nofv runs).
+fv_features_env = os.environ.get("FVGNN_FV_FEATURES", "1")
+if fv_features_env not in ("0", "1"):
+    raise ValueError(f"FVGNN_FV_FEATURES must be '0' or '1', got {fv_features_env!r}")
+use_fv_features = fv_features_env == "1"
+# Cell-volume node feature, FVGNN_VOL_TRANSFORM: "log" (log V) or "cbrt" (V^(1/3),
+# the cell length, the _cbrt runs); see build_static_graph. Needs the FV features.
+cell_volume_transform = os.environ.get("FVGNN_VOL_TRANSFORM", "log")
+if cell_volume_transform not in CELL_VOLUME_TRANSFORMS:
+    raise ValueError(f"FVGNN_VOL_TRANSFORM must be one of {CELL_VOLUME_TRANSFORMS}, "
+                     f"got {cell_volume_transform!r}")
+if cell_volume_transform != "log" and not use_fv_features:
+    raise ValueError("FVGNN_VOL_TRANSFORM=cbrt needs FVGNN_FV_FEATURES=1: "
+                     "the _nofv runs have no cell volume")
 # Node positions (x, y, z) next to the node type: FVGNN_POS_FEATURES=1 keeps
 # them, 0 drops them and keeps only the type (the _nopos runs).
 pos_features_env = os.environ.get("FVGNN_POS_FEATURES", "0")
@@ -124,7 +149,9 @@ if train_seed is not None:
 # after it would silently be read back as an FV run.
 # _cf keeps Cf runs apart from the untagged point_mean ones.
 # _vol keeps runs with the cell-volume node feature (every FV run since it was
-# added) apart from the older, untagged FV runs without it.
+# added) apart from the older, untagged FV runs without it; _cbrt after it for
+# V^(1/3) in place of log V (read back as a whole "_"-separated token), then
+# the dataset tag, likewise.
 # _nopos is read back as a whole "_"-separated token, so its place does not matter.
 # _mpl<n> for n_mp_layers > 1 (one-layer runs keep their untagged names), _skip
 # for the skip connections, which leave no weights to tell them apart.
@@ -138,6 +165,8 @@ exp_name = (f"history{history}_msg_dim64"
             + ("" if input_noise == 0 else f"_noise{input_noise:g}")
             + ("_cf" if boundary_pos == "cf" else "")
             + ("_vol" if use_fv_features else "")
+            + ("" if cell_volume_transform == "log" else f"_{cell_volume_transform}")
+            + (f"_{dataset_tag}" if dataset_tag else "")
             + ("" if use_pos_features else "_nopos")
             + ("" if use_fv_features else "_nofv"))
 
@@ -163,7 +192,7 @@ val_mesh_frac   = 0.2
 seed = 42
 
 raw_data_dir = "../raw_data"
-parametric_dir = os.path.join(raw_data_dir, case_name)
+parametric_dir = os.path.join(raw_data_dir, dataset)
 processed_data_dir = Path("../processed_data")
 pdata_casename = f"{case_name}_{exp_name}"
 run_dir = processed_data_dir / pdata_casename
@@ -201,7 +230,8 @@ save_git_commit(checkpoint_dir)
 # Parsed meshes, shared with test_parametric.py (data_preparation/mesh_cache.py).
 # Clear the directory after changing the raw data.
 use_cache = True
-preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
+# Its keys hold the mesh name, not the dataset, so each dataset has its own.
+preproc_cache_dir = processed_data_dir / f"{dataset}_preproc_cache"
 
 
 # ── 1. Split the meshes into train / val / test ─────────────────────────────
@@ -258,7 +288,8 @@ split_path = checkpoint_dir / "mesh_split.json"
 with open(split_path, "w") as fh:
     json.dump(split_record, fh, indent=2)
 print(f"  split saved to {split_path}")
-save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume=use_fv_features)
+save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume=use_fv_features,
+                  cell_volume_transform=cell_volume_transform, dataset=dataset)
 
 
 # ── 2. Load every mesh's data ───────────────────────────────────────────────
@@ -269,7 +300,8 @@ for case_dir in case_dirs:
     name = os.path.basename(case_dir)
     print(f"Loading {name} ...")
     g, T = load_mesh_cached(case_dir, excluded_patches, boundary_pos,
-                            preproc_cache_dir, use_cache=use_cache)
+                            preproc_cache_dir, use_cache=use_cache,
+                            cell_volume_transform=cell_volume_transform)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
     # node type, + cell volume unless no-FV, + positions unless _nopos

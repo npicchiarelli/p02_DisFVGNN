@@ -13,26 +13,37 @@ from smithers.io.openfoam import field_parser
 # Saved with each checkpoint: how its graphs were built.
 GRAPH_CONFIG = "graph_config.json"
 
+# How the cell volume V becomes a node feature, see build_static_graph.
+CELL_VOLUME_TRANSFORMS = ("log", "cbrt")
 
-def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume):
+
+def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume,
+                      cell_volume_transform="log", dataset="parametric"):
     with open(os.path.join(checkpoint_dir, GRAPH_CONFIG), "w") as fh:
         json.dump({"boundary_pos": boundary_pos,
                    "excluded_patches": list(excluded_patches),
-                   "cell_volume": cell_volume}, fh, indent=2)
+                   "cell_volume": cell_volume,
+                   "cell_volume_transform": cell_volume_transform,
+                   "dataset": dataset}, fh, indent=2)
 
 
 def load_graph_config(checkpoint_dir) -> dict:
     # No file: a checkpoint older than graph_config.json, hence point_mean.
     # No cell_volume key: a checkpoint older than the cell-volume node feature.
+    # No cell_volume_transform key: older than the option, hence log.
+    # No dataset key: older than the option, so raw_data/parametric as it was at
+    # training time. Runs before 2026-11-09 saw the dt = 0.025 data now in
+    # raw_data/parametric_old, not the dt = 0.005 data now in raw_data/parametric.
+    defaults = {"cell_volume": False, "cell_volume_transform": "log", "dataset": "parametric"}
     path = os.path.join(checkpoint_dir, GRAPH_CONFIG)
     if not os.path.exists(path):
-        return {"boundary_pos": "point_mean", "cell_volume": False}
+        return {"boundary_pos": "point_mean", **defaults}
     with open(path) as fh:
-        return {"cell_volume": False, **json.load(fh)}
+        return {**defaults, **json.load(fh)}
 
 
 def node_feature_columns(cell_volume: bool, positions: bool) -> list:
-    # node_attr is [node type (2), log cell volume (1), x, y, z (3)]; the columns a
+    # node_attr is [node type (2), cell volume feature (1), x, y, z (3)]; the columns a
     # model takes. The cell volume is an FV feature, dropped with the FV edge
     # features; checkpoints older than it take cell_volume=False.
     return [0, 1] + ([2] if cell_volume else []) + ([3, 4, 5] if positions else [])
@@ -41,12 +52,17 @@ def node_feature_columns(cell_volume: bool, positions: bool) -> list:
 def build_static_graph(case_dir,
                        excluded_patches,
                        boundary_edge_dir: str = "both",
-                       boundary_pos: str = "cf") -> Data:
+                       boundary_pos: str = "cf",
+                       cell_volume_transform: str = "log") -> Data:
     # boundary_edge_dir orients the cell <-> boundary-node edges, named from the
     # boundary node's point of view: "source" (BC propagates inward only),
     # "sink" (boundary node only receives, so the BC cannot affect the
     # prediction), or "both" (default). See add_boundary_points.
     # boundary_pos: "cf" (default) or "point_mean", see add_boundary_points.
+    # cell_volume_transform: "log" (default) or "cbrt", see the cell volume below.
+    if cell_volume_transform not in CELL_VOLUME_TRANSFORMS:
+        raise ValueError(f"cell_volume_transform must be one of {CELL_VOLUME_TRANSFORMS}, "
+                         f"got {cell_volume_transform!r}")
 
     #-------------------------------------NODES---------------------------------------------
 
@@ -71,10 +87,22 @@ def build_static_graph(case_dir,
     # and have no volume: node_type tells them apart, so they take the mean internal
     # log volume, which keeps them out of the way of the normalizer's statistics
     # (a 0 in log space would sit ~20 away and dominate the std).
-    log_vol = torch.log(load_cell_volumes(case_dir))
-    cell_vol = torch.cat((log_vol, log_vol.mean().expand(N_bnd, 1)), dim = 0)
+    # "cbrt" instead takes V^(1/3), the cell length h, on a linear scale, and 0 on
+    # the boundary nodes: a face centre is a cell of zero thickness. 0 sits inside
+    # the internal range once z-scored (~-1.5 on model_000, internal -1.1..+4.8),
+    # but the fine levels end up closer together than in log (levels 0/1: 0.2
+    # apart against 0.6) and the coarse far field becomes the tail.
+    # The z-scored log h is the same feature as the z-scored log V.
+    vol = load_cell_volumes(case_dir)
+    if cell_volume_transform == "log":
+        vol_int = torch.log(vol)
+        vol_bnd = vol_int.mean().expand(N_bnd, 1)
+    else:
+        vol_int = vol ** (1.0 / 3.0)
+        vol_bnd = torch.zeros(N_bnd, 1, dtype=vol_int.dtype)
+    cell_vol = torch.cat((vol_int, vol_bnd), dim = 0)
 
-    # Adding node type, log cell volume and position to the x attribute of static_graph.
+    # Adding node type, cell volume feature and position to the x attribute of static_graph.
     # The column order is relied on by node_feature_columns.
     static_graph.node_attr = torch.cat((node_type, cell_vol.float(), static_graph.pos.float()), dim = 1).float()
 

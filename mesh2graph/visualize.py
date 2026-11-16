@@ -4,6 +4,9 @@ import plotly.graph_objects as go
 import numpy as np
 import torch_geometric
 
+# Largest canvas side (px) Kaleido's WebGL renders undistorted
+_MAX_WEBGL_PX = 4096
+
 def plot_graph(graph, savepath:str=None):
     graph_nx = torch_geometric.utils.to_networkx(graph, to_undirected=False)
     draw_pos = {i: graph.pos[i].numpy() for i in range(graph.num_nodes)}
@@ -21,17 +24,26 @@ def plot_graph(graph, savepath:str=None):
     if savepath:
         plt.savefig(savepath, dpi=300)
 
-def plot_graphs_3d(graphs, titles=None, savepath: str = None):
+def plot_graphs_3d(graphs, titles=None, savepath: str = None, dpi: int = None):
 
     """
     graphs : list of PyTorch Geometric Data objects
     titles : optional list of legend labels, one per graph
+    dpi    : optional export resolution; Plotly lays out at 96 px/inch, so the
+             image is upscaled by dpi/96 (capped at _MAX_WEBGL_PX) and tagged
+             with that dpi
     """
     n = len(graphs)
     if titles is None:
         titles = [f"Graph {i+1}" for i in range(n)]
 
     colors = ['#7a4444', '#0d2448', 'mediumpurple', 'orange']
+
+    width, height = 1920, 1080
+    # Past _MAX_WEBGL_PX the headless WebGL canvas is clamped and the 3D scene
+    # comes out zoomed and stretched, so cap the upscaling; the PNG keeps the
+    # requested dpi and just prints smaller
+    export_scale = 1 if dpi is None else min(dpi / 96, _MAX_WEBGL_PX / max(width, height))
 
     fig = go.Figure()
 
@@ -52,7 +64,8 @@ def plot_graphs_3d(graphs, titles=None, savepath: str = None):
         fig.add_trace(go.Scatter3d(
             x=edge_x, y=edge_y, z=edge_z,
             mode='lines',
-            line=dict(color=color, width=1),
+            # WebGL line width ignores the export scale (markers follow it)
+            line=dict(color=color, width=export_scale),
             hoverinfo='none',
             showlegend=False
         ))
@@ -81,8 +94,8 @@ def plot_graphs_3d(graphs, titles=None, savepath: str = None):
     )
     fig.update_layout(
         title='',
-        width=1920,
-        height=1080,
+        width=width,
+        height=height,
         paper_bgcolor='rgba(0,0,0,0)',
         scene=dict(
             bgcolor='rgba(0,0,0,0)',
@@ -121,6 +134,15 @@ def plot_graphs_3d(graphs, titles=None, savepath: str = None):
     fig.update_layout(scene_camera=camera)
 
     if savepath:
-        fig.write_image(savepath)
+        if dpi is None:
+            fig.write_image(savepath)
+        else:
+            fig.write_image(savepath, scale=export_scale)
+            if savepath.lower().endswith('.png'):
+                # Kaleido writes no resolution metadata
+                from PIL import Image
+                with Image.open(savepath) as img:
+                    img.load()
+                img.save(savepath, dpi=(dpi, dpi))
     else:
         fig.show()

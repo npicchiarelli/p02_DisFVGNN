@@ -5,7 +5,8 @@ import torch
 import numpy as np
 from torch_geometric.data import Data
 
-from mesh2graph.utils import parse_vertex_centered, add_boundary_points, load_face_surfaces_by_patch, load_face_owners, load_skewness, load_non_orthogonality, load_cell_volumes
+from mesh2graph.utils import parse_vertex_centered, add_boundary_points, load_face_surfaces_by_patch, load_face_owners, load_skewness, load_non_orthogonality, load_cell_volumes, load_laplacian, load_boundary_value_coeffs
+from mesh2graph.laplacian_eigen import laplacian_eigenpairs, boundary_face_values
 from smithers.io.openfoam import FoamMesh
 from smithers.io.openfoam import field_parser
 
@@ -13,16 +14,24 @@ from smithers.io.openfoam import field_parser
 # Saved with each checkpoint: how its graphs were built.
 GRAPH_CONFIG = "graph_config.json"
 
-# How the cell volume V becomes a node feature, see build_static_graph.
-CELL_VOLUME_TRANSFORMS = ("log", "cbrt")
+# Laplacian eigenmodes (mesh2graph/laplacian_eigen.py). The operator is
+# -laplacian(EIG_COEFF, EIG_FIELD) with EIG_FIELD's own BCs, read at EIG_TIME.
+# The cached graphs hold EIG_K_MAX modes; a run takes the first n_eig of them.
+EIG_K_MAX = 32
+EIG_FIELD = "T"
+EIG_COEFF = "DT"
+EIG_TIME  = "0"
 
 
-def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume,
-                      cell_volume_transform="log", dataset="parametric"):
+def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume, cell_volume_transform="log", dataset="parametric", n_eig=0):
     with open(os.path.join(checkpoint_dir, GRAPH_CONFIG), "w") as fh:
         json.dump({"boundary_pos": boundary_pos,
                    "excluded_patches": list(excluded_patches),
                    "cell_volume": cell_volume,
+                   "n_eig": n_eig,
+                   "eig_field": EIG_FIELD,
+                   "eig_coeff": EIG_COEFF,
+                   "eig_time": EIG_TIME,
                    "cell_volume_transform": cell_volume_transform,
                    "dataset": dataset}, fh, indent=2)
 
@@ -30,11 +39,12 @@ def save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volum
 def load_graph_config(checkpoint_dir) -> dict:
     # No file: a checkpoint older than graph_config.json, hence point_mean.
     # No cell_volume key: a checkpoint older than the cell-volume node feature.
+    # No n_eig key: a checkpoint older than the eigenmode node features.
     # No cell_volume_transform key: older than the option, hence log.
     # No dataset key: older than the option, so raw_data/parametric as it was at
     # training time. Runs before 2026-11-09 saw the dt = 0.025 data now in
     # raw_data/parametric_old, not the dt = 0.005 data now in raw_data/parametric.
-    defaults = {"cell_volume": False, "cell_volume_transform": "log", "dataset": "parametric"}
+    defaults = {"cell_volume": False, "cell_volume_transform": "log", "dataset": "parametric", "n_eig": 0}
     path = os.path.join(checkpoint_dir, GRAPH_CONFIG)
     if not os.path.exists(path):
         return {"boundary_pos": "point_mean", **defaults}
@@ -49,16 +59,39 @@ def node_feature_columns(cell_volume: bool, positions: bool) -> list:
     return [0, 1] + ([2] if cell_volume else []) + ([3, 4, 5] if positions else [])
 
 
+def node_features(g: Data, cell_volume: bool, positions: bool, n_eig: int = 0) -> torch.Tensor:
+    """The node features a model takes: the node_feature_columns of node_attr,
+    then the first n_eig Laplacian eigenmodes, always LAST (eig_columns relies on
+    it). The modes live in g.eig_vecs rather than node_attr, so scripts that feed
+    the whole node_attr to a model (train.py, test_flange.py) are unaffected."""
+    x = g.node_attr[:, node_feature_columns(cell_volume, positions)]
+    if n_eig == 0:
+        return x
+    if not hasattr(g, "eig_vecs") or g.eig_vecs.shape[1] < n_eig:
+        have = g.eig_vecs.shape[1] if hasattr(g, "eig_vecs") else 0
+        raise ValueError(f"n_eig = {n_eig} but the graph holds {have} eigenmodes "
+                         f"(built with eig_modes = {have}, at most EIG_K_MAX = {EIG_K_MAX})")
+    return torch.cat((x, g.eig_vecs[:, :n_eig]), dim=1)
+
+
+def eig_columns(n_features: int, n_eig: int) -> list:
+    """Indices of the eigenmode columns in node_features' output."""
+    return list(range(n_features - n_eig, n_features))
+
+
 def build_static_graph(case_dir,
                        excluded_patches,
                        boundary_edge_dir: str = "both",
                        boundary_pos: str = "cf",
+                       eig_modes: int = 0,
                        cell_volume_transform: str = "log") -> Data:
     # boundary_edge_dir orients the cell <-> boundary-node edges, named from the
     # boundary node's point of view: "source" (BC propagates inward only),
     # "sink" (boundary node only receives, so the BC cannot affect the
     # prediction), or "both" (default). See add_boundary_points.
     # boundary_pos: "cf" (default) or "point_mean", see add_boundary_points.
+    # eig_modes > 0 also stores that many Laplacian eigenmodes in g.eig_vecs
+    # (N, eig_modes) and their eigenvalues [1/s] in g.eig_vals; see add_eigenmodes.
     # cell_volume_transform: "log" (default) or "cbrt", see the cell volume below.
     if cell_volume_transform not in CELL_VOLUME_TRANSFORMS:
         raise ValueError(f"cell_volume_transform must be one of {CELL_VOLUME_TRANSFORMS}, "
@@ -160,4 +193,36 @@ def build_static_graph(case_dir,
     edge_attr = torch.cat((dist_vec, dist_norm, surface_area_vec, surface_area_vec_norm, Sk, No), dim=1)
     static_graph.edge_attr = edge_attr.float()
 
+    if eig_modes > 0:
+        add_eigenmodes(static_graph, case_dir, boundary_faces_idx[:N_bnd],
+                       excluded_patches, eig_modes)
+
     return static_graph
+
+
+def add_eigenmodes(static_graph: Data, case_dir, bnd_faces, excluded_patches, k: int):
+    """Eigenmodes of K phi = lam diag(V) phi, K = -laplacian(EIG_COEFF, EIG_FIELD)
+    with the field's own BCs (getLaplacian in getter_of.C).
+
+    Internal nodes are the cells, in cell order. Boundary node j is face
+    bnd_faces[j] (add_boundary_points creates one node per face, in that order),
+    and takes the face value of the homogeneous BC, phi_f = c_f * phi_owner:
+    0 on a fixedValue patch, the owner value on a zeroGradient one.
+    Modes are V-orthonormal, phi.T @ (V * phi) = I, and sign-canonical."""
+    K = load_laplacian(case_dir, EIG_FIELD, EIG_COEFF, EIG_TIME)
+    V = load_cell_volumes(case_dir).numpy().ravel()
+    lam, phi = laplacian_eigenpairs(K, V, k)
+
+    coeffs = load_boundary_value_coeffs(case_dir, EIG_FIELD, EIG_TIME)
+    # Boundary nodes on a patch whose BC does not fix the value are fine for the
+    # modes (they take the owner value), but the graph treats every boundary
+    # node as a BC carrier, so say so.
+    for name, c in coeffs.items():
+        if name not in excluded_patches and len(c) and not np.all(c == 0):
+            print(f"  note: patch {name!r} has graph boundary nodes but its {EIG_FIELD} "
+                  f"BC does not fix the value (c in [{np.nanmin(c):g}, {np.nanmax(c):g}])")
+    phi_b = boundary_face_values(phi, bnd_faces, load_face_owners(case_dir), list(coeffs.values()))
+
+    static_graph.eig_vecs = torch.from_numpy(np.concatenate((phi, phi_b), axis=0)).float()
+    static_graph.eig_vals = torch.from_numpy(lam).float()
+    assert static_graph.eig_vecs.shape[0] == static_graph.num_nodes

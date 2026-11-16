@@ -136,6 +136,22 @@ def load_cell_volumes(directory: str) -> torch.Tensor:
 
     return V
 
+def load_laplacian(directory: str, field: str = "T", coeff: str = "DT", time: str = "0"):
+    """K = -fvm::laplacian(coeff, field), homogeneous part, as a scipy CSR matrix.
+
+    BCs, diffusivity (uniform or a <time>/<coeff> field) and scheme are all read
+    from the case; see getLaplacian in getter_of.C."""
+    of_binder = getter_of([".", "-case", f"{directory}"])
+    return of_binder.getLaplacian(field, coeff, time).tocsr()
+
+def load_boundary_value_coeffs(directory: str, field: str = "T", time: str = "0") -> dict:
+    """{patch name: c}, in boundary order, with phi_face = c * phi_owner under the
+    homogeneous BC of `field` (fixedValue 0, zeroGradient 1, mixed 1 - valueFraction)."""
+    of_binder = getter_of([".", "-case", f"{directory}"])
+    coeffs = of_binder.getBoundaryValueCoeffs(field, time)
+    return {name: np.asarray(c).ravel()
+            for name, c in zip(of_binder.getPatchName(), coeffs)}
+
 def load_face_owners(directory: str) -> np.ndarray:
     """Owner cell of every face, indexed by global face index.
 

@@ -31,25 +31,30 @@ def code_key() -> str:
     return _CODE_KEY
 
 
-def load_mesh_cached(case_dir, excluded_patches, boundary_pos, cache_dir, use_cache=True):
+def load_mesh_cached(case_dir, excluded_patches, boundary_pos, cache_dir, use_cache=True,
+                     cell_volume_transform="log"):
     """Return (static_graph, T_sequence) for one case, cached in cache_dir.
 
-    Keyed by case, excluded patches, boundary_pos and code_key(). Raw-data
-    changes are not detected: clear cache_dir or pass use_cache=False. Graphs
+    Keyed by case, excluded patches, boundary_pos, cell_volume_transform and
+    code_key(). Raw-data changes are not detected: clear cache_dir or pass use_cache=False. Graphs
     keep all edge features; callers drop the FV ones if needed."""
     if not use_cache:
-        return (build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos),
+        return (build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos,
+                                   cell_volume_transform=cell_volume_transform),
                 load_fields(case_dir, "T", excluded_patches=excluded_patches))
 
     name = os.path.basename(os.path.normpath(case_dir))
     excl_key = "-".join(excluded_patches) if excluded_patches else "none"
-    cache_file = Path(cache_dir) / f"{name}__T__{excl_key}__{boundary_pos}__{code_key()}.pt"
+    # log keeps the key it had before the option existed.
+    vol_key = "" if cell_volume_transform == "log" else f"__vol{cell_volume_transform}"
+    cache_file = Path(cache_dir) / f"{name}__T__{excl_key}__{boundary_pos}{vol_key}__{code_key()}.pt"
     if cache_file.exists():
         print(f"  from cache {cache_file.name}")
         blob = torch.load(cache_file, weights_only=False)
         return blob["graph"], blob["T"]
 
-    g = build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos)
+    g = build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos,
+                           cell_volume_transform=cell_volume_transform)
     T = load_fields(case_dir, "T", excluded_patches=excluded_patches)
     # Write, then rename: concurrent runs never read a partial file.
     os.makedirs(cache_dir, exist_ok=True)

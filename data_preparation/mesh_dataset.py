@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Sequence
 from .normalization import FeatureNormalizer
 
 
@@ -23,12 +23,22 @@ class SingleMeshDataset(Dataset):
         normalizer: FeatureNormalizer,
         history: int = 1,
         split_indices: Optional[torch.Tensor] = None,  # subset of timestep indices
+        sign_flip_cols: Sequence[int] = (),  # node_attr columns flipped at random
     ):
         super().__init__()
         self.T = T_sequence
         self.graph = static_graph
         self.norm = normalizer
         self.history = history
+        # Laplacian eigenmodes are defined up to sign, so a training dataset can
+        # flip each of these columns at random, independently per sample (LapPE,
+        # Dwivedi et al.). Needs the columns scale-only normalized
+        # (FeatureNormalizer.fit node_scale_only), or a flip would not be a flip.
+        # Drawn from the global RNG of the process that builds the sample: with
+        # num_workers > 0 (train_parametric.py) the DataLoader workers, so the
+        # main process's draws (init, shuffle order) are the same as in a run
+        # without flips.
+        self.sign_flip_cols = list(sign_flip_cols)
 
         # Which (idx) values are valid samples?
         n_samples = len(T_sequence) - history
@@ -58,7 +68,12 @@ class SingleMeshDataset(Dataset):
         x_T = T_window_norm.T.contiguous()                   # (N, history)
 
         # Concatenate static node geometry: (N, history + n_static_node_feat)
-        x = torch.cat([x_T, self._norm_node_attr], dim=1)
+        node_attr = self._norm_node_attr
+        if self.sign_flip_cols:
+            signs = torch.randint(0, 2, (len(self.sign_flip_cols),)) * 2 - 1
+            node_attr = node_attr.clone()
+            node_attr[:, self.sign_flip_cols] *= signs.to(node_attr.dtype)
+        x = torch.cat([x_T, node_attr], dim=1)
 
         # Target
         y = self.norm.transform_T(self.T[idx + self.history])  # (N,)

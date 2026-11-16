@@ -14,7 +14,7 @@ from tqdm import tqdm
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import save_graph_config, node_feature_columns
+from data_preparation.static_graph import save_graph_config, node_features, eig_columns, EIG_K_MAX
 from export_results.saving_of import saving_of
 from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories
@@ -99,6 +99,22 @@ input_noise = float(os.environ.get("FVGNN_NOISE", "0"))
 if input_noise < 0:
     raise ValueError(f"FVGNN_NOISE must be >= 0, got {input_noise}")
 
+# Laplacian eigenmodes as node features (data_preparation/static_graph.py,
+# add_eigenmodes): FVGNN_EIG=<k> appends the first k modes of the case's own
+# diffusion operator, with T's BCs, after the other node features; 0 (default)
+# leaves them out. They are scale-only normalized. FVGNN_EIG_FLIP=1 flips the
+# sign of each mode at random per training sample, as modes are only defined up
+# to sign; val/test and rollouts never flip.
+n_eig = int(os.environ.get("FVGNN_EIG", "0"))
+if not 0 <= n_eig <= EIG_K_MAX:
+    raise ValueError(f"FVGNN_EIG must be in 0..{EIG_K_MAX}, got {n_eig}")
+eig_flip_env = os.environ.get("FVGNN_EIG_FLIP", "0")
+if eig_flip_env not in ("0", "1"):
+    raise ValueError(f"FVGNN_EIG_FLIP must be '0' or '1', got {eig_flip_env!r}")
+eig_flip = eig_flip_env == "1"
+if eig_flip and n_eig == 0:
+    raise ValueError("FVGNN_EIG_FLIP=1 needs FVGNN_EIG >= 1")
+
 # Rollout validation: every val_rollout_every epochs, roll the model out for
 # val_rollout_steps steps from the start of each val mesh and log the MAE per
 # step. The one-step val loss cannot see whether a rollout stays bounded, so
@@ -128,6 +144,8 @@ if train_seed is not None:
 # _nopos is read back as a whole "_"-separated token, so its place does not matter.
 # _mpl<n> for n_mp_layers > 1 (one-layer runs keep their untagged names), _skip
 # for the skip connections, which leave no weights to tell them apart.
+# _eig<k> for k Laplacian eigenmodes, _eigflip for their random sign flips; both
+# read back as whole tokens.
 exp_name = (f"history{history}_msg_dim64"
             + ("" if n_mp_layers == 1 else f"_mpl{n_mp_layers}")
             + ("_skip" if skip else "")
@@ -136,6 +154,8 @@ exp_name = (f"history{history}_msg_dim64"
             + ("" if lr_scheduler else "_nosched")
             + ("" if msg_penalty == "none" else f"_{msg_penalty}_a{msg_alpha:g}")
             + ("" if input_noise == 0 else f"_noise{input_noise:g}")
+            + ("" if n_eig == 0 else f"_eig{n_eig}")
+            + ("_eigflip" if eig_flip else "")
             + ("_cf" if boundary_pos == "cf" else "")
             + ("_vol" if use_fv_features else "")
             + ("" if use_pos_features else "_nopos")
@@ -258,7 +278,8 @@ split_path = checkpoint_dir / "mesh_split.json"
 with open(split_path, "w") as fh:
     json.dump(split_record, fh, indent=2)
 print(f"  split saved to {split_path}")
-save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume=use_fv_features)
+save_graph_config(checkpoint_dir, boundary_pos, excluded_patches, cell_volume=use_fv_features,
+                  n_eig=n_eig)
 
 
 # ── 2. Load every mesh's data ───────────────────────────────────────────────
@@ -272,8 +293,8 @@ for case_dir in case_dirs:
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]  # geometry features only, drop the FV ones
-    # node type, + cell volume unless no-FV, + positions unless _nopos
-    g.node_attr = g.node_attr[:, node_feature_columns(use_fv_features, use_pos_features)]
+    # node type, + cell volume unless no-FV, + positions unless _nopos, + n_eig modes
+    g.node_attr = node_features(g, use_fv_features, use_pos_features, n_eig)
     static_graphs.append(g)
     T_sequences.append(T)
     print(f"  static graph node_attr: {tuple(g.node_attr.shape)}, "
@@ -285,11 +306,14 @@ for case_dir in case_dirs:
 # anything about the held-out val/test meshes. Every SingleMeshDataset then
 # shares this normalizer.
 
+# The eigenmode columns (last n_eig) are scale-only: no mean subtracted.
+eig_cols = eig_columns(static_graphs[0].node_attr.shape[1], n_eig)
 normalizer = FeatureNormalizer()
 normalizer.fit(
     T_train=torch.cat([T_sequences[i].reshape(-1) for i in train_mesh_idx], dim=0),
     edge_attr=torch.cat([static_graphs[i].edge_attr for i in train_mesh_idx], dim=0),
     node_attr=torch.cat([static_graphs[i].node_attr for i in train_mesh_idx], dim=0),
+    node_scale_only=eig_cols,
 )
 normalizer.save(os.path.join(checkpoint_dir, "normalizer.pt"))
 
@@ -309,12 +333,14 @@ print(f"delta_scale = rms(dT) / T_std = {delta_scale:.4e}")
 # Each mesh uses its FULL time sequence (split_indices=None → all valid
 # samples). Train/val meshes are wrapped into MultiMeshDatasets.
 
-def make_ds(mesh_i):
+def make_ds(mesh_i, train=False):
+    # Only training samples flip the eigenmode signs (FVGNN_EIG_FLIP)
     return SingleMeshDataset(
         T_sequences[mesh_i], static_graphs[mesh_i], normalizer, history,
+        sign_flip_cols=eig_cols if (train and eig_flip) else (),
     )
 
-train_ds = MultiMeshDataset([make_ds(i) for i in train_mesh_idx])
+train_ds = MultiMeshDataset([make_ds(i, train=True) for i in train_mesh_idx])
 val_ds   = MultiMeshDataset([make_ds(i) for i in val_mesh_idx])
 
 n_test_samples = sum(len(T_sequences[i]) - history for i in test_mesh_idx)
@@ -341,7 +367,7 @@ print(f"Using device: {device}")
 if device.type != "cuda" and os.environ.get("FVGNN_REQUIRE_CUDA") == "1":
     raise RuntimeError("FVGNN_REQUIRE_CUDA=1 but CUDA is not available")
 # Feature dimensions are identical across meshes; take them from the first.
-in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + node type (+ position)
+in_node_feat  = history + static_graphs[0].node_attr.shape[1]  # T history + node type (+ volume, position, eigenmodes)
 in_edge_feat  = static_graphs[0].edge_attr.shape[1]            # 10
 
 if train_seed is not None:

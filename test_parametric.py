@@ -30,7 +30,7 @@ from torch_geometric.data import Data
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import load_graph_config, node_feature_columns, GRAPH_CONFIG
+from data_preparation.static_graph import load_graph_config, node_features, eig_columns, GRAPH_CONFIG
 from export_results.saving_of import saving_of
 from mesh2graph.utils import filter_of_time_directories
 from models.fvgnn import FVSurrogate, widths_from_state_dict
@@ -108,6 +108,17 @@ if ("vol" in exp_name.split("_")) != cell_volume:
         f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
         f"on the cell-volume node feature (cell_volume = {cell_volume})."
     )
+# Laplacian eigenmodes: graph_config says how many, exp_name must agree (_eig<k>).
+n_eig = graph_config["n_eig"]
+eig_tokens = [t for t in exp_name.split("_") if re.fullmatch(r"eig\d+", t)]
+if (int(eig_tokens[0][3:]) if eig_tokens else 0) != n_eig or len(eig_tokens) > 1:
+    raise RuntimeError(
+        f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
+        f"on the Laplacian eigenmode node features (n_eig = {n_eig})."
+    )
+if n_eig:
+    print(f"Laplacian eigenmodes: {n_eig} (operator {graph_config['eig_field']}, "
+          f"{graph_config['eig_coeff']}, time {graph_config['eig_time']})")
 if graph_config.get("excluded_patches", excluded_patches) != excluded_patches:
     raise RuntimeError(
         f"Checkpoint was built with excluded_patches="
@@ -190,7 +201,7 @@ def load_mesh(case_dir):
                             preproc_cache_dir, use_cache=use_cache)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
-    g.node_attr = g.node_attr[:, node_feature_columns(cell_volume, use_pos_features)]
+    g.node_attr = node_features(g, cell_volume, use_pos_features, n_eig)
     return g, T
 
 
@@ -220,6 +231,7 @@ else:
         T_train=torch.cat(train_T, dim=0),
         edge_attr=torch.cat(train_edge, dim=0),
         node_attr=torch.cat(train_node, dim=0),
+        node_scale_only=eig_columns(train_node[0].shape[1], n_eig),
     )
     normalizer.save(norm_path)
     print(f"Saved normalizer to {norm_path}")
@@ -255,7 +267,7 @@ print(f"Using device: {device}")
 
 # Feature dims are identical across meshes; take them from any test mesh.
 any_graph = next(iter(test_graphs.values()))
-in_node_feat = history + any_graph.node_attr.shape[1]   # T history + node type, + cell volume under _vol, + 3 positions unless _nopos
+in_node_feat = history + any_graph.node_attr.shape[1]   # T history + node type, + cell volume under _vol, + 3 positions unless _nopos, + k modes under _eig<k>
 in_edge_feat = any_graph.edge_attr.shape[1]             # 10, or 4 under _nofv
 state = torch.load(model_path, map_location=device)
 model = FVSurrogate(

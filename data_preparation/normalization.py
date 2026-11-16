@@ -15,11 +15,15 @@ class FeatureNormalizer:
         self.node_std = None
 
     def fit(self, T_train: torch.Tensor, edge_attr: torch.Tensor,
-            node_attr: torch.Tensor):
+            node_attr: torch.Tensor, node_scale_only=()):
         """
         T_train   : (n_steps, N) — training timesteps only
         edge_attr : (E, F_e)    — static, fit once
         node_attr : (N, F_n)    — static, fit once
+        node_scale_only : node_attr columns divided by their RMS, with no mean
+                    subtracted (mean stored as 0). For sign-ambiguous features such
+                    as Laplacian eigenmodes: a sign flip then stays a sign flip
+                    after normalization. The file format is unchanged.
         """
         self.T_mean = T_train.mean()
         self.T_std  = T_train.std().clamp(min=1e-8)
@@ -29,6 +33,10 @@ class FeatureNormalizer:
 
         self.node_mean = node_attr.mean(dim=0)
         self.node_std  = node_attr.std(dim=0).clamp(min=1e-8)
+        cols = list(node_scale_only)
+        if cols:
+            self.node_mean[cols] = 0.0
+            self.node_std[cols] = node_attr[:, cols].pow(2).mean(dim=0).sqrt().clamp(min=1e-8)
 
     def transform_T(self, T: torch.Tensor) -> torch.Tensor:
         return (T - self.T_mean) / self.T_std

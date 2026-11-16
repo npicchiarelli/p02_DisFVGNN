@@ -19,6 +19,11 @@ dependencies = [
 
     # smithers.io.openfoam imports Ofpp but never declares it, so declare it here.
     "Ofpp>=0.12",
+
+    # Laplacian eigenmodes (mesh2graph/laplacian_eigen.py): sparse shift-invert
+    # eigsh. getter_of.getLaplacian also needs it: pybind11 returns Eigen sparse
+    # matrices as scipy.sparse.
+    "scipy",
 ]
 
 [tool.setuptools.packages.find]

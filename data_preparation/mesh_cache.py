@@ -5,14 +5,16 @@ from pathlib import Path
 
 import torch
 
+import mesh2graph.laplacian_eigen
 import mesh2graph.utils
 from . import field, static_graph
 from .field import load_fields
-from .static_graph import build_static_graph
+from .static_graph import build_static_graph, EIG_K_MAX
 
 
 def _hash_code() -> str:
-    files = [mesh2graph.utils.__file__, sys.modules["getter_of"].__file__,
+    files = [mesh2graph.utils.__file__, mesh2graph.laplacian_eigen.__file__,
+             sys.modules["getter_of"].__file__,
              static_graph.__file__, field.__file__, __file__]
     return hashlib.sha1(b"".join(Path(f).read_bytes() for f in files)).hexdigest()[:8]
 
@@ -36,9 +38,11 @@ def load_mesh_cached(case_dir, excluded_patches, boundary_pos, cache_dir, use_ca
 
     Keyed by case, excluded patches, boundary_pos and code_key(). Raw-data
     changes are not detected: clear cache_dir or pass use_cache=False. Graphs
-    keep all edge features; callers drop the FV ones if needed."""
+    keep all edge features and EIG_K_MAX Laplacian eigenmodes; callers select
+    what they need (static_graph.node_features)."""
     if not use_cache:
-        return (build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos),
+        return (build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos,
+                               eig_modes=EIG_K_MAX),
                 load_fields(case_dir, "T", excluded_patches=excluded_patches))
 
     name = os.path.basename(os.path.normpath(case_dir))
@@ -49,7 +53,8 @@ def load_mesh_cached(case_dir, excluded_patches, boundary_pos, cache_dir, use_ca
         blob = torch.load(cache_file, weights_only=False)
         return blob["graph"], blob["T"]
 
-    g = build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos)
+    g = build_static_graph(case_dir, excluded_patches, boundary_pos=boundary_pos,
+                           eig_modes=EIG_K_MAX)
     T = load_fields(case_dir, "T", excluded_patches=excluded_patches)
     # Write, then rename: concurrent runs never read a partial file.
     os.makedirs(cache_dir, exist_ok=True)

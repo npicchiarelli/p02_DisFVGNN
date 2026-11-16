@@ -119,12 +119,29 @@ if (int(eig_tokens[0][3:]) if eig_tokens else 0) != n_eig or len(eig_tokens) > 1
 if n_eig:
     print(f"Laplacian eigenmodes: {n_eig} (operator {graph_config['eig_field']}, "
           f"{graph_config['eig_coeff']}, time {graph_config['eig_time']})")
+cell_volume_transform = graph_config["cell_volume_transform"]
+if ("cbrt" in exp_name.split("_")) != (cell_volume_transform == "cbrt"):
+    raise RuntimeError(
+        f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
+        f"on the cell-volume transform (cell_volume_transform = {cell_volume_transform!r})."
+    )
+# The raw data the run was trained on (graph_config.json), and its cache.
+dataset = graph_config["dataset"]
+dataset_tag = "" if dataset == "parametric" else dataset.removeprefix("parametric").lstrip("_")
+if dataset_tag and dataset_tag not in exp_name.split("_"):
+    raise RuntimeError(
+        f"exp_name {exp_name!r} and {checkpoint_dir / GRAPH_CONFIG} disagree "
+        f"on the dataset (dataset = {dataset!r}).")
+parametric_dir = os.path.join(raw_data_dir, dataset)
 if graph_config.get("excluded_patches", excluded_patches) != excluded_patches:
     raise RuntimeError(
         f"Checkpoint was built with excluded_patches="
         f"{graph_config['excluded_patches']}, this script uses {excluded_patches}."
     )
+print(f"Dataset: {parametric_dir}")
 print(f"Boundary nodes: {boundary_pos}")
+if cell_volume:
+    print(f"Cell volume feature: {cell_volume_transform}")
 
 os.makedirs(pred_dir, exist_ok=True)
 os.makedirs(error_dir, exist_ok=True)
@@ -192,13 +209,14 @@ print(f"  test  meshes ({len(test_mesh_idx)}): {names_of(test_mesh_idx)}")
 
 # Shared with train_parametric.py (data_preparation/mesh_cache.py).
 use_cache = True
-preproc_cache_dir = processed_data_dir / "parametric_preproc_cache"
+preproc_cache_dir = processed_data_dir / f"{dataset}_preproc_cache"
 
 
 def load_mesh(case_dir):
     """Return (static_graph, T_sequence) for one case, built as in training."""
     g, T = load_mesh_cached(case_dir, excluded_patches, boundary_pos,
-                            preproc_cache_dir, use_cache=use_cache)
+                            preproc_cache_dir, use_cache=use_cache,
+                            cell_volume_transform=cell_volume_transform)
     if not use_fv_features:
         g.edge_attr = g.edge_attr[:, :4]
     g.node_attr = node_features(g, cell_volume, use_pos_features, n_eig)

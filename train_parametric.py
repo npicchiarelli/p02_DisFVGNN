@@ -14,7 +14,7 @@ from tqdm import tqdm
 from data_preparation.mesh_cache import load_mesh_cached
 from data_preparation.mesh_dataset import SingleMeshDataset, MultiMeshDataset
 from data_preparation.normalization import FeatureNormalizer
-from data_preparation.static_graph import save_graph_config, node_feature_columns, eig_columns, EIG_K_MAX, CELL_VOLUME_TRANSFORMS
+from data_preparation.static_graph import save_graph_config, node_features, eig_columns, EIG_K_MAX, CELL_VOLUME_TRANSFORMS
 from export_results.saving_of import saving_of
 from git_commit import save_git_commit
 from mesh2graph.utils import filter_of_time_directories

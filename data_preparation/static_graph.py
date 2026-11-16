@@ -14,6 +14,9 @@ from smithers.io.openfoam import field_parser
 # Saved with each checkpoint: how its graphs were built.
 GRAPH_CONFIG = "graph_config.json"
 
+# How the cell volume V becomes a node feature, see build_static_graph.
+CELL_VOLUME_TRANSFORMS = ("log", "cbrt")
+
 # Laplacian eigenmodes (mesh2graph/laplacian_eigen.py). The operator is
 # -laplacian(EIG_COEFF, EIG_FIELD) with EIG_FIELD's own BCs, read at EIG_TIME.
 # The cached graphs hold EIG_K_MAX modes; a run takes the first n_eig of them.
